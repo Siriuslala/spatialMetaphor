@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.py[cod]
+*$py.class
+.DS_Store
+
+figures/
+
+README0.md

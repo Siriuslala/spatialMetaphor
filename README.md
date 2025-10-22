@@ -1,0 +1,1 @@
+# Up Is Good: Probing the Spatial Metaphor in Foundation Models
