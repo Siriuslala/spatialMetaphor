@@ -173,7 +173,7 @@ def analyze_sae_activations(
                 ]
             )
             fig = format_plotly_figure(fig)
-            img_dir = root_dir / f"figures/{release.replace('-', '_')}/layer_{layer_id}"
+            img_dir = root_dir / f"figures/sae_{release.replace('-', '_')}/layer_{layer_id}"
             img_dir.mkdir(parents=True, exist_ok=True)
             save_path = img_dir / f"{prompt_name}_{act_name}.pdf"
             fig.write_image(save_path.as_posix())
