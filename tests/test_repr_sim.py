@@ -221,7 +221,7 @@ if all_vectors:
     # 归一化可能有助于t-SNE
     all_vectors_cat = normalize(all_vectors_cat, axis=1)
 
-    tsne = TSNE(n_components=2, perplexity=min(5, all_vectors_cat.shape[0]-1), random_state=42, init='pca', learning_rate='auto')
+    tsne = TSNE(n_components=2, perplexity=min(5, all_vectors_cat.shape[0]-1), random_state=41, init='pca', learning_rate='auto')
     vectors_2d = tsne.fit_transform(all_vectors_cat)
 
     plt.figure(figsize=(10, 8))
@@ -243,7 +243,8 @@ if all_vectors:
     plt.xlabel('t-SNE Component 1')
     plt.ylabel('t-SNE Component 2')
     plt.grid(True)
-    plt.savefig("tsne_representation.png")
-    print("t-SNE图像已保存为 'tsne_representation.png'")
+    fig_dir = root_dir / "figures"
+    plt.savefig(fig_dir / "tsne_representation.png")
+    print(f"t-SNE图像已保存在 {fig_dir / 'tsne_representation.png'}")
 else:
     print("没有提取到足够的向量用于可视化。")
