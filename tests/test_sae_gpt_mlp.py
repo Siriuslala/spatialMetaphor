@@ -54,6 +54,7 @@ print(cfg_dict)  # d_in: 768, d_sae: 24576,
 
 
 def get_dashboard_html(sae_release = "gpt2-small", sae_id="7-res-jb", feature_idx=0):
+    # https://www.neuronpedia.org/gpt2-small/7-res-jb/3121?embed=true&embedexplanation=true&embedplots=true&embedtest=true&height=300
     # https://neuronpedia.org/gpt2-small/7-mlp-tm/3121?embed=true&embedexplanation=true&embedplots=true&embedtest=true&height=300
     html_template = "https://neuronpedia.org/{}/{}/{}?embed=true&embedexplanation=true&embedplots=true&embedtest=true&height=300"
     return html_template.format(sae_release, sae_id, feature_idx)

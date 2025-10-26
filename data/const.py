@@ -57,7 +57,7 @@ EMOTION_NEGATIVE_KEWORDS_CN = ["悲伤"]  # ["悲伤", "沮丧", "失望", "痛�
 ORIENTATION_POSTTIVE_KEYWORDS_CN = ["向上"]  # ["上升", "提升", "上涨", "升高", "提高", "攀升", "增长", "飞升", "跃升", "飙升"]
 ORIENTATION_NEGATIVE_KEYWORDS_CN = ["向下"]  # ["向上", "向下"]
 
-EMOTION_POSITIVE_KEWORDS_EN = ["happy"]  # ["happy", "joyful", "excited", "content", "pleased", "delighted", "cheerful", "optimistic", "elated", "thrilled"]
-EMOTION_NEGATIVE_KEWORDS_EN = ["sad"]  # ["sad", "depressed", "unhappy", "angry", "frustrated", "worried", "anxious", "scared", "depressing", "worried"]
-ORIENTATION_POSTTIVE_KEYWORDS_EN = ["upward"]  # ["rising", "improving", "rising", "rising", "rising", "rising", "rising", "rising", "rising", "rising"]
-ORIENTATION_NEGATIVE_KEYWORDS_EN = ["downward"]  # ["down", "down"]
+EMOTION_POSITIVE_KEWORDS_EN = ["happy", "joyful", "excited", "pleased", "delighted", "cheerful", "optimistic", "elated", "thrilled"]
+EMOTION_NEGATIVE_KEWORDS_EN = ["sad", "unhappy", "miserable", "depressed", "gloomy", "anxious", "worried", "upset", "lonely", "pessimistic", "frustrated"]
+ORIENTATION_POSTTIVE_KEYWORDS_EN = ["upward", "up", "front", "forward"]
+ORIENTATION_NEGATIVE_KEYWORDS_EN = ["downward", "down", "back", "backward"]
