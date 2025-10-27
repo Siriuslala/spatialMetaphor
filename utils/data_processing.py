@@ -32,7 +32,7 @@ concept_name_to_keywords = {
 }
 
 
-def get_huggingface_dataset(dataset_name):
+def get_huggingface_dataset(dataset_name, hf_key=None):
     # command = "huggingface-cli download --repo-type dataset --token 'hf-...' --resume-download 数据集名称 --cache-dir '' --local-dir-use-symlinks False"
     snapshot_download(
         repo_id=dataset_name, 
@@ -40,7 +40,7 @@ def get_huggingface_dataset(dataset_name):
         # cache_dir="/raid_sdd/lyy/dataset",
         # local_dir_use_symlinks=False, 
         resume_download=True,
-        token=hf_pile_key,
+        token=hf_key,
     )
 
 def is_english(sentence):
@@ -151,9 +151,10 @@ if __name__ == "__main__":
     # make_metaphor_data_with_context_templates(output_dir, language, keyword_num=1)
 
     # Get huggingface dataset
-    # dataset_name = "NeelNanda/pile-10k"
-    # get_huggingface_dataset(dataset_name)
+    dataset_name = "monology/pile-uncopyrighted"  # "NeelNanda/pile-10k"
+    hf_key = None
+    get_huggingface_dataset(dataset_name, hf_key=hf_key)
 
     # Process pile dataset
-    process_data_pile(concept_name="orientation_negative", language="en", data_num=1000)
+    # process_data_pile(concept_name="orientation_negative", language="en", data_num=1000)
 

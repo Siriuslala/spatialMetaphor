@@ -97,8 +97,8 @@ def extract_representations(sentences, target_words, model, tokenizer, layer_ind
             mean_vector = torch.mean(vectors_slice, dim=0).cpu()
             target_vectors.append(mean_vector)
             # verify
-            extracted_tokens = [tokenized_sentences[i][idx] for idx in target_token_indices]
-            print(f"Sentence {i}: {tokenized_sentences[i]}, Extracted tokens for '{target_word}': {extracted_tokens}")
+            # extracted_tokens = [tokenized_sentences[i][idx] for idx in target_token_indices]
+            # print(f"Sentence {i}: {tokenized_sentences[i]}, Extracted tokens for '{target_word}': {extracted_tokens}")
         else:
             print(f"警告：在 '{sentence}' 中找到了 '{target_word}'，但未能在 offsets 中匹配到 token。")
             print(f"    Offsets: {offsets}")
