@@ -16,6 +16,7 @@ root_dir = Path(os.getenv('ROOT_DIR', Path(__file__).parent.parent))
 data_dir = Path(os.getenv('DATA_DIR'))
 data_dir_public = Path(os.getenv('DATA_DIR_PUBLIC'))
 work_dir = Path(os.getenv('WORK_DIR'))
+hf_pile_key=os.getenv('HUGGINGFACE_PILE_KEY')
 sys.path.append(root_dir.as_posix())
 hf_pile_key=os.getenv('HUGGINGFACE_PILE_KEY')
 
