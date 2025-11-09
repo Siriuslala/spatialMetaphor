@@ -61,3 +61,61 @@ EMOTION_POSITIVE_KEWORDS_EN = ["happy", "joyful", "excited", "pleased", "delight
 EMOTION_NEGATIVE_KEWORDS_EN = ["sad", "unhappy", "miserable", "depressed", "gloomy", "anxious", "worried", "upset", "lonely", "pessimistic", "frustrated"]
 ORIENTATION_POSTTIVE_KEYWORDS_EN = ["upward", "up", "front", "forward"]
 ORIENTATION_NEGATIVE_KEYWORDS_EN = ["downward", "down", "back", "backward"]
+
+
+PROMPT_FILTER_KEYWORD_UP_EN = """
+Given a sentence with "up", determine its category by these rules:
+Category 1 (Physical): "Up" denotes the spatial meaning of "upward" in the physical world. It must refer to a **visible, dynamic and concrete action of moving "upward"** from a person or object.
+Category 2 (Abstract): "Up" acts as a spatial metaphor. It represents an abstract meaning of being or going "upward" of an **invisible concept** like number, quantity, emotion or time, etc. (e.g., He is feeling up / The price went up / up to 9 pages / ...).
+Category 3 (Idiomatic): "Up" has no "upward" meaning whatsoever. It has no relationship with spatial orientation. It simply pairs with a verb **without** any directional or practical significance (e.g., give up, sum up, show up, shut up, ...).
+Please analyze the sentence according to the rules above, and directly output the category ID (1, 2, or 3).
+Sentence: {sentence}
+Category ID:
+"""
+
+PROMPT_FILTER_KEYWORD_DOWN_EN = """
+Given a sentence with "down", determine its category by these rules:
+Category 1 (Physical): "Down" denotes the spatial meaning of "downward" in the physical world. It must refer to a **visible, dynamic and concrete action of moving "downward"** from a person or object.
+Category 2 (Abstract): "Down" acts as a spatial metaphor. It represents an abstract meaning of being or going "downward" of an **invisible concept** like number, quantity, emotion or time, etc. (e.g., He is feeling down / The price went down / ...).
+Category 3 (Idiomatic): "Down" has no "downward" meaning whatsoever. It has no relationship with spatial orientation. It simply pairs with a verb **without** any directional or practical significance (e.g., cut down, break down, shut down, ...).
+Please directly output the category ID (1, 2, or 3).
+Sentence: {sentence}
+Category ID:
+"""
+
+PROMPT_FILTER_KEYWORD_HAPPY_EN = """
+Given a sentence with "happy", determine its category by these rules:
+Category 1: The overall sentiment is positive, aligning with the meaning of "happy" (e.g., She is happy to meet her friends).
+Category 2: The sentence contains "happy" but the overall meaning is neutral or negative (e.g., He is not happy).
+Please directly output the category ID (1 or 2).
+Sentence: {sentence}
+Category ID:
+"""
+
+PROMPT_FILTER_KEYWORD_SAD_EN = """
+Given a sentence with "sad", determine its category by these rules:
+Category 1: The overall sentiment is negative, aligning with the meaning of "sad" (e.g., She is sad and frustrated).
+Category 2: The sentence contains "sad" but the overall meaning is neutral or positive (e.g., He is not sad any more).
+Please directly output the category ID (1 or 2).
+Sentence: {sentence}
+Category ID:
+"""
+
+PROMPT_FILTER_KEYWORD_UP_EN_CN = """
+给你一条包含单词"up"的句子, 请你判断其类别, 规则如下:
+类别1: "up"表示物理世界中空间意义上的”向上“的方向，必须是可以看见的具体的”向上“的动作或现象，例如fly up / jump up / stand up / ...等;
+类别2: "up"作为空间隐喻，即表示不可观测的抽象意义上的”向上“，例如He is feeling up / The price went up / ...等;
+类别3: "up"没有任何”向上“的含义，只是单纯地和动词搭配，没有任何方向性和实际意义，例如give up / sum up / show up / ... 等。
+请你在分析过后直接输出该句的类别序号。
+句子: {}
+类别:
+"""
+
+PROMPT_FILTER_KEYWORD_HAPPY_EN_CN = """
+给你一条包含单词"happy"的句子, 请你判断其类别, 规则如下:
+类别1: 该句上下文所传达的情感是积极的情绪，与"happy"的意义相符，如She is happy to meet her friends;
+类别2: 该句仅仅含有单纯"happy"，但整体表达的语义是中立或消极的，如He is not happy;
+请你在分析过后直接输出该句的类别序号。
+句子: {}
+类别:
+"""
