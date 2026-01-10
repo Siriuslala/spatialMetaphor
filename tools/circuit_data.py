@@ -52,9 +52,8 @@ class EAPDataset(Dataset):
             target_corr_str = "Ġ" + target_corrupt_tokens[i] if target_corrupt_tokens[i].isalnum() else target_corrupt_tokens[i]
             
             try:
-                clean_end_pos = clean_tokens.index(target_clean_str) - 1
-                corr_end_pos = corr_tokens.index(target_corr_str) - 1
-                
+                clean_end_pos = self.get_target_token_position(clean_tokens, target_clean_str)
+                corr_end_pos = self.get_target_token_position(corr_tokens, target_corr_str)
                 self.clean_end_positions.append(clean_end_pos)
                 self.corr_end_positions.append(corr_end_pos)
                 
@@ -73,7 +72,6 @@ class EAPDataset(Dataset):
             "clean_inputs": {
                 "input_ids": self.clean_input_ids[idx],
                 "attention_mask": self.clean_attention_mask[idx],
-                # 注意: 在你的 EAP 示例中，这些是列表，而不是 Tensor，因为它们是 per-example 值
                 "end_positions": self.clean_end_positions[idx],
                 "clean_token_ids": self.clean_token_ids[idx],
             },
@@ -84,8 +82,13 @@ class EAPDataset(Dataset):
                 "corrupted_token_ids": self.corr_token_ids[idx],
             },
         }
+    
+    def get_target_token_position(self, tokens: List[str], target_token: str) -> int:
+        for i in range(len(tokens) - 1, -1, -1):
+            if tokens[i] == target_token:
+                return i
+        raise ValueError(f"Target token {target_token} not found in tokens {tokens}")
 
-    # 为了方便，添加一个方法来获取整个批次，以适配你的原始 EAP 封装器调用
     def get_full_batch(self) -> Dict[str, Dict[str, Union[torch.Tensor, List[int]]]]:
         """
         Return the full batch of the dataset as a dictionary.
@@ -104,3 +107,26 @@ class EAPDataset(Dataset):
                 "corrupted_token_ids": self.corr_token_ids,
             },
         }
+
+
+if __name__ == "__main__":
+    
+    model = HookedTransformer.from_pretrained("gpt2")
+    tokenizer = model.tokenizer
+    clean_prompts = ["He just won the game and is feeling happy."]
+    corrupt_prompts = ["He just lost the game and is feeling sad."]
+    target_clean_tokens = ["happy"]
+    target_corrupt_tokens = ["sad"]
+    # dataset = EAPDataset(
+    #     model=model,
+    #     tokenizer=tokenizer,
+    #     clean_prompts=clean_prompts,
+    #     corrupt_prompts=corrupt_prompts,
+    #     target_clean_tokens=target_clean_tokens,
+    #     target_corrupt_tokens=target_corrupt_tokens,
+    # )
+    # batch = dataset.get_full_batch()
+    # print(batch)
+
+    print(tokenizer.tokenize("He just won the game and is feeling happy."))
+    print(tokenizer.tokenize("happy"))

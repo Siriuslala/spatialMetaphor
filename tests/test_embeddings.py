@@ -125,7 +125,7 @@ def check_embedding_vectors_emotion(model_names, device="cuda:0", lang="en", use
         plot_linewidth = 1.5
         # font = ImageFont.truetype(FONT_PATH, size=15) if lang == "zh" else None
         font = FontProperties(fname=FONT_PATH) if lang == "zh" else None
-        fontsize=12
+        fontsize=16
         font_offset = fontsize * 0.2
         for i, token in enumerate(tokens):
             vec = vectors[token_label[i]]
@@ -179,6 +179,14 @@ def check_embedding_vectors_emotion(model_names, device="cuda:0", lang="en", use
                 color=colors[0], fontsize=fontsize, ha='left', va='bottom', fontproperties=font)
         plt.text(mid_x_ud, mid_y_ud, labels[1], 
                 color=colors[1], fontsize=fontsize, ha='left', va='bottom', fontproperties=font)
+        
+        # set axis labels
+        plt.xlabel("PCA dimension 1", fontsize=fontsize)
+        plt.ylabel("PCA dimension 2", fontsize=fontsize)
+
+        # set the fontsize of tick labels
+        plt.tick_params(axis='both', which='major', labelsize=fontsize)
+        
         
         # plt.legend(loc="best", prop=font if lang == "zh" else None)
         plt.axis('equal')
@@ -368,16 +376,20 @@ def check_embedding_vectors_time(model_names, device="cuda:0", lang="en", use_st
         with open(info_path, "w") as f:
             f.write(f"sim(happy-sad, up-down): {sim_hs_ud}\n")
 
+
 if __name__ == "__main__":
     pass
 
-    model_names = ["meta-llama/Llama-3.1-8B-Instruct", "Qwen/Qwen3-0.6B", "Qwen/Qwen3-8B", "Qwen/Qwen2-7B", "Qwen/Qwen2.5-7B-Instruct", "meta-llama/Llama-2-7B-hf", "Qwen/Qwen3-4B-Instruct-2507"]
-    check_embedding_vectors_emotion(
-        model_names,
-        device="cuda:3",
-        lang="de",
-        use_standarization=False,
-        discard_principal_component=False
-    )
-    # check_embedding_antonyms(model_name, token_pairs=[("front", "back"), ("tomorrow", "yesterday"), ("forward", "backward")])
-    # check_embedding_antonyms(model_name, token_pairs=[("king", "queen"), ("man", "woman")])
+    # check_embedding_vectors_emotion ======================================================================
+    if True:
+        model_names = ["meta-llama/Llama-3.1-8B-Instruct", "Qwen/Qwen3-0.6B", "Qwen/Qwen3-8B", "Qwen/Qwen2-7B", "Qwen/Qwen2.5-7B-Instruct", "meta-llama/Llama-2-7B-hf", "Qwen/Qwen3-4B-Instruct-2507"]
+        # model_names = ["Qwen/Qwen2-7B", "Qwen/Qwen2.5-7B-Instruct", "meta-llama/Llama-2-7B-hf", "Qwen/Qwen3-4B-Instruct-2507"]
+        check_embedding_vectors_emotion(
+            model_names,
+            device="cuda:2",
+            lang="de",  # en, zh, fr, es, it, de
+            use_standarization=False,
+            discard_principal_component=False
+        )
+        # check_embedding_antonyms(model_name, token_pairs=[("front", "back"), ("tomorrow", "yesterday"), ("forward", "backward")])
+        # check_embedding_antonyms(model_name, token_pairs=[("king", "queen"), ("man", "woman")])
