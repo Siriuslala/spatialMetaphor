@@ -140,6 +140,10 @@ if __name__ == "__main__":
     if True:
         lang = "en"
         model_name = "qwen2.5-7b" #  "gpt2-small"
-        task1_circuit_path = ROOT_DIR / f"figures/circuits/emotion/{lang}/{model_name}/eap/info.jsonl"
-        task2_circuit_path = ROOT_DIR / f"figures/circuits/ioi/{lang}/{model_name}/eap/info.jsonl"
+        task1_circuit_path = ROOT_DIR / f"figures/circuits/ioi/{lang}/{model_name}/eap/info.jsonl"
+        task2_circuit_path = ROOT_DIR / f"figures/circuits/space/{lang}/{model_name}/eap/info.jsonl"
         compute_circuit_overlap(task1_circuit_path, task2_circuit_path)
+
+        # emotion vs. space: Node-level IoU: 0.4291
+        # emotion vs. ioi: Node-level IoU: 0.2960
+        # space vs. ioi: Node-level IoU: 0.2989
