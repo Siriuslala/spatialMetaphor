@@ -13,7 +13,28 @@ import torch.nn as nn
 import safetensors
 from transformers import AutoModel, AutoModelForCausalLM, BitsAndBytesConfig, AutoTokenizer
 from huggingface_hub import hf_hub_download
-from sae_lens import SAE, HookedSAETransformer  # pip install -U sae-lens
+import sae_lens
+from sae_lens import SAE, HookedSAETransformer, SAEConfig  # pip install -U sae-lens
+
+import os
+import sys
+from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=Path(__file__).parent.parent / '.env')
+ROOT_DIR = Path(os.getenv('ROOT_DIR', Path(__file__).parent.parent))
+DATA_DIR = Path(os.getenv('DATA_DIR'))
+WORK_DIR = Path(os.getenv('WORK_DIR'))
+sys.path.append(ROOT_DIR.as_posix())
+
+from tools.hook import gather_residual_activations
+from utils.plot_helpers import (
+    generate_token_activation_map,
+    generate_multi_token_activation_maps
+)
+
+# monkey patch
+from utils.monkey_patch.patch_sae_lens import patched_get_safetensors_tensor_shapes
+sae_lens.loading.pretrained_sae_loaders.get_safetensors_tensor_shapes = patched_get_safetensors_tensor_shapes
 
 
 def test_gemma(device="cuda"):
@@ -77,7 +98,7 @@ def load_sae_gemma(
         L0: Literal["small", "medium", "big"] = "medium",
         device="cuda"
     """
-    # load sae
+    # load sae params
     sae_id = f"layer_{layer}_width_{width}_l0_{L0}"
     # maybe downloaded
     path_to_params = hf_hub_download(
@@ -87,13 +108,23 @@ def load_sae_gemma(
     params = safetensors.torch.load_file(path_to_params)
     params = {k.replace("w_enc", "W_enc").replace("w_dec", "W_dec"): v for k, v in params.items()}
 
-    # load sae
     d_model, d_sae = params["W_enc"].shape
     print(f"d_model: {d_model}, d_sae: {d_sae}")
+
+    # load sae
+    # cfg = SAEConfig(
+    #     d_in=d_model,
+    #     d_sae=d_sae,
+    #     activation_fn="relu",
+    #     device=device
+    # )
+    # sae = SAE(cfg)
+    # sae.load_state_dict(params)
+
     sae = SAE.from_pretrained(
         release=release,
         sae_id=sae_id,
-        device=device
+        device=device,
     )
     # print the param keys in sae
     # print(sae.state_dict().keys())  # ['b_dec', 'W_dec', 'W_enc', 'threshold', 'b_enc']
@@ -123,38 +154,25 @@ def test_sae_gemma_pytorch(model_name, device="cuda", **sae_kwargs):
 
     # get inputs
     prompt = "The law of conservation of energy states that energy cannot be created or destroyed, only transformed."
-    tokens = tokenizer.tokenize(prompt)
+    tokens = tokenizer.tokenize(prompt, add_special_tokens=True)
     print(tokens)
     inputs = tokenizer.encode(prompt, return_tensors="pt", add_special_tokens=True).to(device)
     # inputs = tokenizer(prompt, return_tensors="pt")
     
-    # prepare hooks
-    def hook_fn(module, input, output, cache, key):
-        # Gemma transformer blocks output a tuple; hidden states are first
-        hidden_states = output[0] if isinstance(output, tuple) else output
-        cache[key] = hidden_states.detach()
-
-    cache = {}
-    key = "resid_post"
+    # forward and cache the residual activations
     target_layer = 22
-    hook = partial(hook_fn, cache=cache, key=key)
-    handle = model.model.layers[target_layer].register_forward_hook(hook)
-
-    # forward
-    try:
-        with torch.no_grad():
-            model(inputs)
-    finally:
-        handle.remove()
+    cahced_act = gather_residual_activations(model, target_layer, inputs)
 
     # Use SAE on extracted activations
-    target_act = cache[key]
+    ## find sae features
+    target_act = cahced_act
     sae_acts = sae.encode(target_act.to(torch.float32))
     recon = sae.decode(sae_acts)
     print(f"Cache shape: {target_act.shape}")  # [1, 19, 1152]
     print(f"SAE activations shape: {sae_acts.shape}")  # [1, 19, 65536]
     print(f"Reconstruction shape: {recon.shape}")  # [1, 19, 1152]
 
+    ## find recon loss
     reconstruction_mse = torch.mean((recon[:, 1:] - target_act[:, 1:].float()) ** 2)
     target_variance = target_act[:, 1:].float().var()
     fvu = reconstruction_mse / target_variance
@@ -163,6 +181,120 @@ def test_sae_gemma_pytorch(model_name, device="cuda", **sae_kwargs):
     l0_per_token = (sae_acts > 1).sum(-1)[0]
     print(l0_per_token.tolist())
     print(f"Average L0: {l0_per_token[1:].float().mean():.2f}")
+
+    ## find top features
+    top_activations, top_features = sae_acts.max(-1)
+    print(top_features)
+
+    top_acts, top_latents = sae_acts.squeeze().mean(0).topk(5)  # [1, 19, 65536]
+    for act, idx in zip(top_acts, top_latents):
+        print(f"{act:>6.1f} | {idx}")
+    
+    ## study single feature
+    feature_idx = 6524
+    activations = sae_acts[0, :, feature_idx].tolist()
+
+    fig_dir = ROOT_DIR / "figures"
+    save_dir = fig_dir / "sae_gemma"
+    save_dir.mkdir(parents=True, exist_ok=True)
+    model_name = model_name.split("/")[-1]
+    output_path = save_dir / f"{model_name}-sae_feat_{feature_idx}-prompt_physics.pdf"
+    generate_token_activation_map(tokens, activations, output_path)
+
+def test_sae_gemma_pytorch_explore_one_feature(
+    model_name, 
+    device="cuda",
+    target_layer=22,
+    feature_idx=6524,
+    **sae_kwargs, 
+):
+    # load models
+    model = AutoModelForCausalLM.from_pretrained(model_name).to(device).eval()
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    sae = load_sae_gemma(device=device, **sae_kwargs)
+
+    all_results = []
+    for prompt in [
+        "Gemma Scope 2 is a model release from Google DeepMind",
+        "Lorem ipsum dolor sit amet, consectetur adipiscing elit",
+        "Gravity describes how massive objects attract one another",
+        "A charge accelerating through an electric field experiences a force",
+        "Chemical fuel stores energy in molecular bonds, which is released"
+    ]:
+        inputs = tokenizer.encode(prompt, return_tensors="pt", add_special_tokens=True).to(device)
+        _target_acts = gather_residual_activations(model, target_layer, inputs)
+
+        _sae_acts = sae.encode(_target_acts.to(torch.float32))
+
+        tokens = tokenizer.tokenize(prompt, add_special_tokens=True)
+        act_values = _sae_acts[0, :, feature_idx].tolist()
+        all_results.append({
+            "tokens": tokens,
+            "activations": act_values
+        })
+    fig_dir = ROOT_DIR / "figures"
+    save_dir = fig_dir / "sae_gemma"
+    save_dir.mkdir(parents=True, exist_ok=True)
+    model_name = model_name.split("/")[-1]
+    output_path = save_dir / f"{model_name}-sae_feat_{feature_idx}-prompts.pdf"
+    generate_multi_token_activation_maps(all_results, output_path)
+    
+
+def test_sae_gemma_pytorch_intervene(model_name, device="cuda", **sae_kwargs):
+    # load models
+    model = AutoModelForCausalLM.from_pretrained(model_name).to(device).eval()
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    sae = load_sae_gemma(device=device, **sae_kwargs)
+
+    # get inputs
+    prompt = "The law of conservation of energy states that energy cannot be created or destroyed, only transformed."
+    tokens = tokenizer.tokenize(prompt)
+    print(tokens)
+    inputs = tokenizer.encode(prompt, return_tensors="pt", add_special_tokens=True).to(device)
+    # inputs = tokenizer(prompt, return_tensors="pt")
+    
+    # prepare hooks
+    def fwd_pass_with_sae_intervention(model, sae, target_layer, inputs):
+        # Forward pass to get logits & hidden activations
+        model_output_clean = model.forward(inputs, output_hidden_states=True)
+        logits_clean = model_output_clean.logits[0]  # (len, vocab_size)
+        hidden_states = model_output_clean.hidden_states[target_layer + 1][0]  # (len, d_model), [0]: get first sample
+
+        # Get the SAE reconstruction
+        recon = sae(hidden_states.to(torch.float32))  # (len, d_model)
+
+        def intervene_on_target_act_hook(mod, inputs, outputs):
+            # outputs[0]: hidden_states (bsz, len, d_model)
+            # [0, 1:]: first sample, all tokens except the first one
+            outputs[0][0, 1:] = recon[1:]
+            return outputs
+
+        handle = model.model.layers[target_layer].register_forward_hook(intervene_on_target_act_hook)
+        try:
+            model_output = model.forward(inputs)
+        finally:
+            handle.remove()
+
+        # Get logits from this corrupted forward pass
+        logits = model_output.logits[0]
+
+        return logits_clean, logits
+    
+    def cross_entropy_loss(logits: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
+        """Measures avg cross entropy loss."""
+        logprobs = logits[:-1].log_softmax(dim=-1)
+        tokens = tokens[1:]
+        correct_logprobs = logprobs[torch.arange(len(tokens)), tokens]
+        return -correct_logprobs
+
+    target_layer = 22
+    logits_clean, logits_sae = fwd_pass_with_sae_intervention(model, sae, target_layer, inputs)
+    loss_clean = cross_entropy_loss(logits_clean, inputs[0])
+    loss_sae = cross_entropy_loss(logits_sae, inputs[0])
+
+    print(f"Loss (clean): {loss_clean.mean():.4f}")
+    print(f"Loss (corrupted): {loss_sae.mean():.4f}")
+    print(f"Delta loss: {loss_sae.mean() - loss_clean.mean():.4f}")
 
 
 if __name__ == "__main__":
@@ -181,4 +313,6 @@ if __name__ == "__main__":
         "width": "65k",
         "L0": "medium",
     }
-    test_sae_gemma_pytorch(model_name, device="cuda:2", **sae_kwargs)
+    # test_sae_gemma_pytorch(model_name, device="cuda:1", **sae_kwargs)
+    test_sae_gemma_pytorch_explore_one_feature(model_name, device="cuda:1", **sae_kwargs)
+    # test_sae_gemma_pytorch_intervene(model_name, device="cuda:1", **sae_kwargs)
