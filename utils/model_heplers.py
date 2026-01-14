@@ -143,8 +143,15 @@ def vllm_infer(llm, batch, max_tokens: int = 32, temperature: float = 0.7):
             
     return generated_texts
 
+def format_prompt_gemma(user_prompt: str) -> str:
+    return f"""<start_of_turn>user
+    {user_prompt}<end_of_turn>
+    <start_of_turn>model
+    """
+
 
 if __name__ == "__main__":
+    
     model_name = "Qwen/Qwen3-8B"
     batch = ["你好", "0.10000+0.200000等于多少？"] * 4
     use_vllm = False

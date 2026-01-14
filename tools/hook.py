@@ -23,3 +23,22 @@ def gather_residual_activations(model, target_layer, inputs):
         handle.remove()
 
     return cache["resid_post"]
+
+def gather_transcoder_activations(model, target_layer, inputs):
+
+    cache = {}
+
+    handle_input = model.model.layers[target_layer].pre_feedforward_layernorm.register_forward_hook(
+        partial(gather_acts_hook, cache=cache, key="transcoder_input", use_input=False)
+    )
+    handle_target = model.model.layers[target_layer].post_feedforward_layernorm.register_forward_hook(
+        partial(gather_acts_hook, cache=cache, key="transcoder_target", use_input=False)
+    )
+
+    try:
+        _ = model.forward(inputs)
+    finally:
+        handle_input.remove()
+        handle_target.remove()
+
+    return cache
