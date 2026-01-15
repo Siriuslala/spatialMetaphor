@@ -17,8 +17,8 @@ from transformer_lens import HookedTransformer
 
 from tools.eap.eap.eap_wrapper import EAP_standard, EAP_IG_standard
 from tools.eap.eap.patching_metric import avg_logit_diff
-from tools.circuit_data import EAPDataset
-from tools.circuit_analysis import compute_circuit_overlap
+from tools.eap.circuit_data import EAPDataset
+from tools.eap.circuit_analysis import compute_circuit_overlap
 
 
 def get_circuit_dataset(model, tokenizer, theme="emotion"):

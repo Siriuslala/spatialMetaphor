@@ -35,6 +35,6 @@ from utils.plot_helpers import (
 )
 
 # monkey patch
-from utils.monkey_patch.patch_sae_lens import patched_get_safetensors_tensor_shapes
-sae_lens.loading.pretrained_sae_loaders.get_safetensors_tensor_shapes = patched_get_safetensors_tensor_shapes
+from utils.monkey_patch.patch_sae_lens import patched_gemma_3_sae_huggingface_loader
+sae_lens.loading.pretrained_sae_loaders.NAMED_PRETRAINED_SAE_LOADERS["gemma_3"] = patched_gemma_3_sae_huggingface_loader
 
