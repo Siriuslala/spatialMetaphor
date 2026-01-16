@@ -142,7 +142,11 @@ def load_transcoder_gemma(
     device="cuda"
 ):
     """
-    Load transcoder. For names, please refer to `sae_lens/pretrained_saes.yaml`.
+    Load transcoder. 
+    For release names, please refer to:
+        `sae_lens/pretrained_saes.yaml`.
+    For repo id, please refer to:
+        https://huggingface.co/google/gemma-scope-2
     For model archs, please refer to:
         https://decoderesearch.github.io/SAELens/latest/api/;
         https://storage.googleapis.com/deepmind-media/DeepMind.com/Blog/gemma-scope-2-helping-the-ai-safety-community-deepen-understanding-of-complex-language-model-behavior/Gemma_Scope_2_Technical_Paper.pdf.
@@ -163,7 +167,7 @@ def load_transcoder_gemma(
 
     transcoder = SkipTranscoder.from_pretrained(
         release=release,
-        sae_id=f"{transcoder_pos}/{transcoder_id}",
+        sae_id=f"{transcoder_pos}/{transcoder_id}" if transcoder_pos == "transcoder" else transcoder_id,
         device=device,
     )
     # print(transcoder)

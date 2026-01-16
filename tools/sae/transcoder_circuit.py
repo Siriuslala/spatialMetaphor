@@ -3,6 +3,7 @@ import gc
 import math
 import random
 import numpy as np
+from functools import partial
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Any, Callable, Set, Optional
@@ -91,6 +92,7 @@ class ModelActivationsEngine:
         self.cache = {}
         self.hooks = []
         self.current_input_ids = None
+        self.num_layers = getattr(model.config, "num_hidden_layers", getattr(model.config, "n_layer", None))
 
     def set_input(self, input_text: str):
         inputs = self.tokenizer(input_text, return_tensors="pt").to(self.model.device)
@@ -98,25 +100,26 @@ class ModelActivationsEngine:
         self.cache = {}
         self.clear_hooks()
 
-    def _get_hook(self, storage_dict, name):
-        def hook(module, input, output):
-            if isinstance(output, tuple):
-                val = output[0]
-                if len(output) > 1 and "attn_weights" in name:
-                    storage_dict[name] = output[1].detach()
-                    return
-            else:
-                val = output
-            if "mlp_in" in name:
-                val = input[0]
-            storage_dict[name] = val.detach()
-        return hook
+    def _basic_hook(self, module, input, output, cache, key):
+        if isinstance(output, tuple):
+            acts = output[0]
+        else:
+            acts = output
+        # print(f"acts: {acts}")
+        # print(f"acts shape: {acts.shape}")
+        # print(f"key: {key}")
+        # breakpoint()
+        cache[key] = acts.detach()
+    
+    def _attn_hook(self, module, input, output, cache, key):
+        if isinstance(output, tuple):
+            acts = output[0]
+        else:
+            acts = output
+        cache[key] = acts.detach()
 
-    def _get_stopping_hook(self):
-        """这是一个特殊的 Hook，用于抛出异常停止推理"""
-        def hook(module, input, output):
-            raise StopForward()
-        return hook
+    def _stopping_hook(self):
+        raise StopForward()
 
     def clear_hooks(self):
         for h in self.hooks:
@@ -127,28 +130,31 @@ class ModelActivationsEngine:
         """
         获取特定层激活值。如果开启重算，则只运行模型到该层为止 (Early Stopping)。
         """
+        target_key = f"layers.{layer_idx}.transcoder_input"
         if not self.use_recomputation and self.cache:
-            if f"layers.{layer_idx}.mlp_in" in self.cache:
+            if target_key in self.cache:
                 return self.cache
 
         target_storage = self.cache if not self.use_recomputation else {}
      
-        if f"layers.{layer_idx}.mlp_in" in target_storage:
+        if target_key in target_storage:
             return target_storage
 
-        # --- 注册 Hooks ---
         self.clear_hooks()
-        # 在重算模式下，只 Hook 目标层
-        layers_to_hook = [layer_idx]
+        
+        if self.use_recomputation:
+            layers_to_hook = [layer_idx]
+        else:
+            layers_to_hook = list(range(self.num_layers))
      
         for l in layers_to_hook:
             hf_layer = self.model.model.layers[l]
-            self.hooks.append(hf_layer.mlp.register_forward_hook(
-                self._get_hook(target_storage, f"layers.{l}.mlp_in")
+            self.hooks.append(hf_layer.pre_feedforward_layernorm.register_forward_hook(
+                partial(self._basic_hook, cache=target_storage, key=f"layers.{l}.transcoder_input")
             ))
             # Hook v_proj 用于近似 Attention Output
             self.hooks.append(hf_layer.self_attn.v_proj.register_forward_hook(
-                self._get_hook(target_storage, f"layers.{l}.v_out")
+                partial(self._attn_hook, cache=target_storage, key=f"layers.{l}.v_out")
             ))
          
             # 【优化重点】：在目标层之后注册一个阻断器
@@ -157,14 +163,17 @@ class ModelActivationsEngine:
                 # 注册在当前层(Layer L)的输出上，或者注册在 Layer L+1 的输入上
                 # 最稳妥的是注册在该层 forward 的最后。
                 # 对于 HF 模型，直接 Hook layer 模块本身即可捕获 output
-                self.hooks.append(hf_layer.register_forward_hook(self._get_stopping_hook()))
+                self.hooks.append(hf_layer.register_forward_hook(self._stopping_hook))
 
         # --- 运行 Forward (带 Early Stopping) ---
         try:
             with torch.no_grad():
                 # 注意：output_attentions=True 可能导致 StopForward 失效(因为 HF 内部实现)，
                 # 但通常 hook 会先执行。
-                self.model(self.current_input_ids, output_attentions=True)
+                outputs = self.model(self.current_input_ids, output_attentions=True)
+                # if outputs.attentions is not None:
+                #     print(f"outputs.attentions shape: {outputs.attentions.shape}")
+                #     target_storage[f"layers.{l}.attn_weights"] = outputs.attentions[layer_idx].detach()
              
         except StopForward:
             # 这是我们预期的行为：模型运行到目标层后停止了
@@ -200,31 +209,33 @@ class CircuitDiscoverer:
         tc = self.tc_manager.get(layer_idx)
         return tc.W_enc[:, feature_idx]
 
-    def calculate_upstream(self, target_vector, target_layer, token_idx, top_k=5):
+    def calculate_upstream(self, target_vector, target_layer, token_idx, top_k=5, threshold=0.0):
         contributions = []
         prev_layer = target_layer - 1
-        if prev_layer < 0: return []
+        if prev_layer < 0: 
+            return []
 
         acts = self.act_engine.get_layer_activations(prev_layer)
      
-        # 1. Transcoder 贡献
+        # Transcoder attribution
         try:
             tc_prev = self.tc_manager.get(prev_layer)
             virtual_weight = tc_prev.W_dec @ target_vector
-            mlp_in = acts[f"layers.{prev_layer}.mlp_in"]
+            mlp_in = acts[f"layers.{prev_layer}.transcoder_input"]
             x_token = mlp_in[0, token_idx, :]
             feature_acts = tc_prev.encode(x_token)
             tc_scores = feature_acts * virtual_weight
          
             top_vals, top_inds = torch.topk(tc_scores, k=top_k)
+            print(f"Top {top_k} TC scores for layer {prev_layer}: {top_vals}")
             for score, idx in zip(top_vals, top_inds):
-                if abs(score.item()) > 1e-4:
+                if abs(score.item()) >= threshold:
                     node = CircuitNode(prev_layer, 'transcoder_feature', idx.item())
                     contributions.append((score.item(), node))
         except Exception as e:
-            pass
+            print(f"Error in calculate_upstream for layer {prev_layer}: {e}")
 
-        # 2. Attention 贡献
+        # Attention attribution
         try:
             # 尝试获取 Attention 相关的张量
             # 注意：如果 Hook 没抓到 attn_weights (可能因为模型内部实现差异)，这里会跳过
@@ -261,25 +272,23 @@ class CircuitDiscoverer:
          
             # 进度条
             pbar = tqdm(current_layer_nodes, desc=f"Layer {start_layer - depth} -> {start_layer - depth -1}", leave=False)
-         
             for node in pbar:
                 if node.node_type == 'transcoder_feature':
                     target_vec = self.get_transcoder_feature_vector(node.layer, node.index)
                     upstream = self.calculate_upstream(target_vec, node.layer, token_idx, top_k=branches)
                  
                     for score, prev_node in upstream:
-                        # 添加到图
                         graph.add_edge(prev_node, node, score)
                         next_layer_nodes.append(prev_node)
          
-            if not next_layer_nodes: break
+            if not next_layer_nodes:
+                print(f"Early stopping at depth {depth+1} due to no upstream nodes.")
+                break
             current_layer_nodes = list(set(next_layer_nodes))
          
         return graph
 
-# --- 6. 绘图功能 (Visualizer) ---
-
-def plot_circuit_graph(graph: CircuitGraph, title="Transcoder Circuit"):
+def plot_circuit_graph(graph: CircuitGraph, save_path="transcoder_circuit.png"):
     """
     使用 Plotly 绘制计算图。
     模仿 circuit_analysis.py 的风格：
@@ -370,7 +379,7 @@ def plot_circuit_graph(graph: CircuitGraph, title="Transcoder Circuit"):
     ))
 
     fig.update_layout(
-        title=title,
+        # title=title,
         showlegend=False,
         xaxis=dict(title="Layer", tickmode='linear', tick0=min(sorted_layers), dtick=1),
         yaxis=dict(showticklabels=False), # 隐藏 Y 轴刻度，因为没有物理意义
@@ -378,58 +387,73 @@ def plot_circuit_graph(graph: CircuitGraph, title="Transcoder Circuit"):
         height=600
     )
  
-    fig.show()
+    # save figure
+    fig.write_image(save_path)
 
-# --- 7. 主函数 ---
-
-def run_analysis_pipeline(model_name, device="cuda", **transcoder_kwargs):
+def run_analysis_pipeline(
+    model_name, 
+    device="cuda", 
+    target_feat=100,
+    max_depth=3,
+    max_branches=4,
+    use_recomputation=False,
+    **transcoder_kwargs
+):
     from transformers import AutoModelForCausalLM, AutoTokenizer
     # from your_file import load_transcoder_gemma # 记得导入你的加载函数
  
     print(f"Loading Model: {model_name}...")
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16).to(device).eval()
+    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16).to(device).eval()
     tokenizer = AutoTokenizer.from_pretrained(model_name)
  
-    # 1. 准备组件
     tc_manager = LazyTranscoderManager(
         load_fn=load_transcoder_gemma,
         device=device,
         **transcoder_kwargs
     )
-    # 开启重算优化
-    act_engine = ModelActivationsEngine(model, tokenizer, use_recomputation=True)
+    act_engine = ModelActivationsEngine(model, tokenizer, use_recomputation=use_recomputation)
     discoverer = CircuitDiscoverer(model, tc_manager, act_engine)
  
-    # 2. 运行发现算法
     target_layer = transcoder_kwargs["layer"]
-    target_feat = 100 # 示例特征 ID
-    prompt = "The quick brown fox jumped over the lazy dog"
+    prompt = "The quick brown fox jumped over the lazy dog."
  
     graph = discoverer.run(
         start_layer=target_layer,
         start_feature_idx=target_feat,
         input_text=prompt,
-        max_depth=3,
-        branches=4
+        max_depth=max_depth,
+        branches=max_branches
     )
  
-    # 3. 绘图
     print("Plotting graph...")
-    plot_circuit_graph(graph, title=f"Circuit for L{target_layer} Feat {target_feat}")
+    fig_dir = ROOT_DIR / "figures/transcoder_circuits/test"
+    fig_dir.mkdir(parents=True, exist_ok=True)
+    plot_circuit_graph(graph, save_path=f"{fig_dir}/layer{target_layer}_feat{target_feat}_depth{max_depth}_branches{max_branches}.png")
  
-    # 清理
     del model
     torch.cuda.empty_cache()
 
-# 运行示例 (取消注释)
-# run_analysis_pipeline(
-#    "google/gemma-2-2b",
-#    device="cuda:0",
-#    # Transcoder args
-#    repo_id="google/gemma-scope-2-1b-pt",
-#    transcoder_pos="transcoder",
-#    release="gemma-scope-2-1b-pt-transcoders",
-#    layer=17,
-#    width="65k",
-#    L0="medium"
-# )
+
+if __name__ == "__main__":
+
+    # 16k, small
+    # 262k, big
+    transcoder_kwargs = {
+        "repo_id": "google/gemma-scope-2-1b-pt",  # "google/gemma-scope-2-1b-pt", "google/gemma-scope-2-1b-it"
+        "transcoder_pos": "transcoder_all",
+        "release": "gemma-scope-2-1b-pt-transcoders-all",
+        "width": "16k",  # 16k, 262k
+        "L0": "small",  # small, big
+        "layer": 25,  # start layer
+    }
+    run_analysis_pipeline(
+        "google/gemma-3-1b-pt",
+        device="cuda:5",
+        target_feat=100,
+        max_depth=5,
+        max_branches=8,
+        use_recomputation=False,
+        **transcoder_kwargs,
+    )
+
+
