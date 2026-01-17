@@ -123,7 +123,6 @@ def EAP_batch_mean(
     """
     Original implementation of EAP. It input all prompts, and iteratively process them in batches.
     """
-
     graph = EAPGraph(model.cfg, upstream_nodes, downstream_nodes)
 
     assert clean_tokens.shape == corrupted_tokens.shape, "Shape mismatch between clean and corrupted tokens"
@@ -169,7 +168,6 @@ def EAP_batch_mean(
         # we don't need gradients for this forward pass
         # we'll take the gradients when we perform the forward pass on the clean input
         with torch.no_grad(): 
-            corrupted_tokens = corrupted_tokens.to(model.cfg.device)
             model(corrupted_tokens[idx:idx+batch_size], return_type=None)        
 
         # now we perform a forward and backward pass on the clean input
@@ -202,6 +200,7 @@ def EAP_standard(
     metric: Callable,
     upstream_nodes: List[str]=None,
     downstream_nodes: List[str]=None,
+    calc_batch_size = None,
 ):
     """
     "standard" means we create a corrupted prompt for the input.
@@ -251,33 +250,53 @@ def EAP_standard(
         graph=graph
     )
 
-    # we first perform a forward pass on the corrupted input 
-    model.add_hook(upstream_hook_filter, corruped_upstream_hook_fn, "fwd")
+    # start
+    if calc_batch_size is None:
+        calc_batch_size = batch_size
+    num_prompts = batch_size
 
-    # we don't need gradients for this forward pass
-    # we'll take the gradients when we perform the forward pass on the clean input
-    with torch.no_grad(): 
-        model(corrupted_input_ids, attention_mask=corrupted_attention_mask, return_type=None)        
+    for idx in tqdm(range(0, num_prompts, calc_batch_size)):
+        # we first perform a forward pass on the corrupted input 
+        model.add_hook(upstream_hook_filter, corruped_upstream_hook_fn, "fwd")
 
-    # now we perform a forward and backward pass on the clean input
-    model.reset_hooks()
-    model.add_hook(upstream_hook_filter, clean_upstream_hook_fn, "fwd")
-    model.add_hook(downstream_hook_filter, clean_downstream_hook_fn, "bwd")
+        # we don't need gradients for this forward pass
+        # we'll take the gradients when we perform the forward pass on the clean input
+        with torch.no_grad():
+            model(
+                corrupted_input_ids[idx:idx+calc_batch_size], 
+                attention_mask=corrupted_attention_mask[idx:idx+calc_batch_size], 
+                return_type=None
+            )      
 
-    clean_logits = model(clean_input_ids, attention_mask=clean_attention_mask, return_type="logits")
-    value = metric(clean_logits, end_positions, clean_token_ids, corrupted_token_ids)
-    value.backward()
-    
-    # We delete the activation differences tensor to free up memory
-    model.zero_grad()
-    upstream_activations_difference *= 0
+        # now we perform a forward and backward pass on the clean input
+        model.reset_hooks()
+        model.add_hook(upstream_hook_filter, clean_upstream_hook_fn, "fwd")
+        model.add_hook(downstream_hook_filter, clean_downstream_hook_fn, "bwd")
+
+        clean_logits = model(
+            clean_input_ids[idx:idx+calc_batch_size], 
+            attention_mask=clean_attention_mask[idx:idx+calc_batch_size], 
+            return_type="logits"
+        )
+        value = metric(
+            clean_logits, 
+            end_positions[idx:idx+calc_batch_size], 
+            clean_token_ids[idx:idx+calc_batch_size], 
+            corrupted_token_ids[idx:idx+calc_batch_size]
+        )
+        value.backward()
+        
+        # We delete the activation differences tensor to free up memory
+        model.zero_grad()
+        upstream_activations_difference *= 0
+        model.reset_hooks()
 
     del upstream_activations_difference
     gc.collect()
     torch.cuda.empty_cache()
     model.reset_hooks()
 
-    graph.eap_scores /= batch_size
+    graph.eap_scores /= num_prompts
     graph.eap_scores = graph.eap_scores.cpu()
 
     return graph

@@ -131,7 +131,13 @@ class EAPGraph:
 
             if hook_type == "hook_q_input" or hook_type == "hook_k_input" or hook_type == "hook_v_input":
                 letter = hook_type.split("_")[1].lower()
-                head_num = self.cfg.n_heads if "q" in hook_type else self.cfg.n_key_value_heads
+                if "q" in hook_type:
+                    head_num = self.cfg.n_heads
+                else:
+                    if self.cfg.n_key_value_heads is not None:
+                        head_num = self.cfg.n_key_value_heads
+                    else:
+                        head_num = self.cfg.n_heads
                 for head_idx in range(head_num):
                     self.downstream_nodes.append(f"head.{layer}.{head_idx}.{letter}")
                     self.downstream_node_index[f"head.{layer}.{head_idx}.{letter}"] = downstream_node_index + head_idx
@@ -309,7 +315,14 @@ class EAPGraph:
         downstream_nodes = [edge[1] for edge in top_edges]
         subgraph = EAPGraph(upstream_nodes, downstream_nodes)
 
-        return subgraph
+        return 
+    
+    def get_all_existing_edges(graph):
+
+        total_possible_edges = graph.n_upstream_nodes * graph.n_downstream_nodes
+        all_edges = graph.top_edges(n=total_possible_edges, abs_scores=False)
+        
+        return all_edges
 
     def show(
         self,

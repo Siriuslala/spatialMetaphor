@@ -627,7 +627,7 @@ if __name__ == "__main__":
         device="cuda:5",
         target_feat=101,
         max_depth=3,
-        max_branches=6,
+        max_branches=5,
         use_recomputation=False,
         **transcoder_kwargs,
     )

@@ -1,15 +1,15 @@
 import jsonlines
 
 
-def compute_circuit_overlap(task1_edges_path, task2_edges_path):
+def compute_circuit_overlap(task1_edges_path, task2_edges_path, topn=1000):
     edges_task1 = []
     edges_task2 = []
     with jsonlines.open(task1_edges_path, "r") as f:
         for line in f:
-            edges_task1 = line["edges"]
+            edges_task1 = line["edges"][:topn]
     with jsonlines.open(task2_edges_path, "r") as f:
         for line in f:
-            edges_task2 = line["edges"]
+            edges_task2 = line["edges"][:topn]
 
     # compute IoU from node level and edge level separately
     nodes_task1 = set()
