@@ -23,31 +23,33 @@ sys.path.append(ROOT_DIR.as_posix())
 from tools.sae.test_gemma_scope_2 import load_transcoder_gemma
 
 
-# --- 1. 定义异常用于提前停止模型推理 ---
 class StopForward(Exception):
     """用于在获取到所需激活值后强制停止模型前向传播，节省计算资源"""
     pass
 
-# --- 2. 基础数据结构 ---
 
 @dataclass(frozen=True)
 class CircuitNode:
     layer: int
     node_type: str # 'transcoder_feature', 'attn_head'
     index: int
+    src_token: Optional[int] = None  # 用于 Attn Head 指明源 Token
  
     def __repr__(self):
         if self.node_type == 'transcoder_feature':
             return f"L{self.layer}.TC.{self.index}"
         elif self.node_type == 'attn_head':
-            return f"L{self.layer}.A.{self.index}"
+            token_str = f".T{self.src_token}" if self.src_token is not None else ""
+            return f"L{self.layer}.A{self.index}{token_str}"
         return f"L{self.layer}.{self.node_type}"
+
 
 @dataclass
 class CircuitEdge:
     source: CircuitNode
     target: CircuitNode
     score: float
+
 
 @dataclass
 class CircuitGraph:
@@ -64,7 +66,6 @@ class CircuitGraph:
         self.node_scores[str(source)] = self.node_scores.get(str(source), 0) + abs(score)
         # Target 节点的分数通常由其自身的父节点决定，这里主要记录它在路径中的活跃度
 
-# --- 3. 懒加载管理器 (不变) ---
 
 class LazyTranscoderManager:
     def __init__(self, load_fn: Callable, device="cuda", **transcoder_kwargs):
@@ -82,7 +83,6 @@ class LazyTranscoderManager:
             self.loaded_transcoders[layer] = self.load_fn(**kwargs)
         return self.loaded_transcoders[layer]
 
-# --- 4. 优化的激活值引擎 (Early Stopping) ---
 
 class ModelActivationsEngine:
     def __init__(self, model, tokenizer, use_recomputation=True):
@@ -100,11 +100,15 @@ class ModelActivationsEngine:
         self.cache = {}
         self.clear_hooks()
 
-    def _basic_hook(self, module, input, output, cache, key):
-        if isinstance(output, tuple):
-            acts = output[0]
+    def _basic_hook(self, module, input, output, cache, key, save_input=False):
+        
+        if save_input:
+            acts = input[0]
         else:
-            acts = output
+            if isinstance(output, tuple):
+                acts = output[0]
+            else:
+                acts = output
         # print(f"acts: {acts}")
         # print(f"acts shape: {acts.shape}")
         # print(f"key: {key}")
@@ -117,6 +121,12 @@ class ModelActivationsEngine:
         else:
             acts = output
         cache[key] = acts.detach()
+    
+    def _attn_weights_hook(self, module, input, output, cache, key):
+        # output[1] 通常是 attn_weights (batch, heads, q_len, k_len)
+        # 注意：必须确保模型推理时 output_attentions=True
+        if len(output) > 1 and output[1] is not None:
+            cache[key] = output[1].detach()
 
     def _stopping_hook(self):
         raise StopForward()
@@ -149,46 +159,36 @@ class ModelActivationsEngine:
      
         for l in layers_to_hook:
             hf_layer = self.model.model.layers[l]
-            self.hooks.append(hf_layer.pre_feedforward_layernorm.register_forward_hook(
-                partial(self._basic_hook, cache=target_storage, key=f"layers.{l}.transcoder_input")
+
+            # get attention input and output attentions
+            self.hooks.append(hf_layer.input_layernorm.register_forward_hook(
+                partial(self._basic_hook, cache=target_storage, key=f"layers.{l}.attn_input_residual", save_input=True)
             ))
-            # Hook v_proj 用于近似 Attention Output
-            self.hooks.append(hf_layer.self_attn.v_proj.register_forward_hook(
-                partial(self._attn_hook, cache=target_storage, key=f"layers.{l}.v_out")
+            self.hooks.append(hf_layer.input_layernorm.register_forward_hook(
+                partial(self._basic_hook, cache=target_storage, key=f"layers.{l}.attn_input", save_input=False)
+            ))
+            self.hooks.append(hf_layer.self_attn.register_forward_hook(
+                partial(self._attn_weights_hook, cache=target_storage, key=f"layers.{l}.attn_scores")
+            ))
+
+            # get transcoder input
+            self.hooks.append(hf_layer.pre_feedforward_layernorm.register_forward_hook(
+                partial(self._basic_hook, cache=target_storage, key=f"layers.{l}.transcoder_input_residual", save_input=True)
+            ))
+            self.hooks.append(hf_layer.pre_feedforward_layernorm.register_forward_hook(
+                partial(self._basic_hook, cache=target_storage, key=f"layers.{l}.transcoder_input", save_input=False)
             ))
          
-            # 【优化重点】：在目标层之后注册一个阻断器
-            # 我们Hook在当前层的最后，确保当前层计算完后立即停止
             if self.use_recomputation:
-                # 注册在当前层(Layer L)的输出上，或者注册在 Layer L+1 的输入上
-                # 最稳妥的是注册在该层 forward 的最后。
-                # 对于 HF 模型，直接 Hook layer 模块本身即可捕获 output
                 self.hooks.append(hf_layer.register_forward_hook(self._stopping_hook))
 
-        # --- 运行 Forward (带 Early Stopping) ---
+        # Forward
         try:
             with torch.no_grad():
-                # 注意：output_attentions=True 可能导致 StopForward 失效(因为 HF 内部实现)，
-                # 但通常 hook 会先执行。
-                outputs = self.model(self.current_input_ids, output_attentions=True)
-                # if outputs.attentions is not None:
-                #     print(f"outputs.attentions shape: {outputs.attentions.shape}")
-                #     target_storage[f"layers.{l}.attn_weights"] = outputs.attentions[layer_idx].detach()
-             
+                self.model.set_attn_implementation('eager')
+                self.model(self.current_input_ids, output_attentions=True)
         except StopForward:
-            # 这是我们预期的行为：模型运行到目标层后停止了
             pass
-     
-        # 补充：Attention Pattern 通常在 outputs 里，但因为我们在中间停止了，outputs 没返回。
-        # 因此我们需要在 hook 里抓取 attn_weights。
-        # 这里的复杂点是 HF 的 attn_weights 是在 forward 内部产生的。
-        # 为了简化，如果我们要精确的 Attn Weights，可能需要 hook self_attn 模块的输出。
-        # 上面的 _get_hook 已经处理了 tuple output 的情况。
-     
-        # 确保 attn_weights 被抓取 (Hack for HF)
-        # 如果 self_attn hook 没抓到 (因为 StopForward 抛出太快)，
-        # 我们可能需要移除 StopForward hook，但这会牺牲速度。
-        # 实际上，register_forward_hook 在 self_attn 执行完后会立即触发，所以应该能抓到。
      
         self.clear_hooks()
         if self.use_recomputation:
@@ -196,7 +196,6 @@ class ModelActivationsEngine:
          
         return target_storage
 
-# --- 5. 发现逻辑 (Discoverer) ---
 
 class CircuitDiscoverer:
     def __init__(self, model, tc_manager: LazyTranscoderManager, act_engine: ModelActivationsEngine):
@@ -206,51 +205,140 @@ class CircuitDiscoverer:
         self.config = model.config
      
     def get_transcoder_feature_vector(self, layer_idx, feature_idx):
+        # W_enc: (d_model, d_sae)
         tc = self.tc_manager.get(layer_idx)
         return tc.W_enc[:, feature_idx]
 
     def calculate_upstream(self, target_vector, target_layer, token_idx, top_k=5, threshold=0.0):
+        """
+        We want to compute the upstream contributions in layer l(l'-1) to the target feature in the target layer l'.
+        Params:
+            target_vector: the feature vector of the target feature
+            target_layer: l'
+            token_idx: int
+            top_k: int
+            threshold: float
+        """
         contributions = []
+        next_vectors = []  # pass to the next layer
+
         prev_layer = target_layer - 1
         if prev_layer < 0: 
-            return []
+            return [], []
 
         acts = self.act_engine.get_layer_activations(prev_layer)
+
+        ln_in = acts[f"layers.{prev_layer}.transcoder_input_residual"][0, token_idx, :]
+        ln_out = acts[f"layers.{prev_layer}.transcoder_input"][0, token_idx, :]
+        scale = ln_out.norm() / (ln_in.norm() + 1e-6)
      
         # Transcoder attribution
         try:
             tc_prev = self.tc_manager.get(prev_layer)
-            virtual_weight = tc_prev.W_dec @ target_vector
+            gradient = tc_prev.W_dec @ target_vector  # (d_sae, d_out) * (d_out,) -> (d_sae,)
+
             mlp_in = acts[f"layers.{prev_layer}.transcoder_input"]
             x_token = mlp_in[0, token_idx, :]
-            feature_acts = tc_prev.encode(x_token)
-            tc_scores = feature_acts * virtual_weight
+            with torch.no_grad():
+                feature_acts = tc_prev.encode(x_token)
+
+            tc_scores = feature_acts * gradient
          
             top_vals, top_inds = torch.topk(tc_scores, k=top_k)
-            print(f"Top {top_k} TC scores for layer {prev_layer}: {top_vals}")
+
+            # print(f"Top {top_k} TC scores for layer {prev_layer}: {top_vals.tolist()}")
             for score, idx in zip(top_vals, top_inds):
                 if abs(score.item()) >= threshold:
                     node = CircuitNode(prev_layer, 'transcoder_feature', idx.item())
                     contributions.append((score.item(), node))
+
+                    # Next Vector = W_enc_prev[idx] * gradient[idx] * scale
+                    W_enc_i = tc_prev.W_enc[:, idx.item()]
+                    # grad_i = gradient[idx.item()]
+                    # next_vector = W_enc_i * grad_i * scale
+                    next_vector = W_enc_i * score.item() * scale
+                    next_vectors.append(next_vector)
         except Exception as e:
             print(f"Error in calculate_upstream for layer {prev_layer}: {e}")
+            return [], []
 
         # Attention attribution
         try:
-            # 尝试获取 Attention 相关的张量
-            # 注意：如果 Hook 没抓到 attn_weights (可能因为模型内部实现差异)，这里会跳过
-            if f"layers.{prev_layer}.v_out" in acts:
-                v_out = acts[f"layers.{prev_layer}.v_out"]
-                # 这是一个简化的假设，如果拿不到 weights，就无法精确计算 Head 贡献
-                # 在此版本中，如果 cache 里没有 weights，我们暂时跳过 Attn 计算，避免报错
-                # 实际生产代码需要更细致的 Hook
-                pass
-                # (原逻辑保持不变，此处省略以节省篇幅，重点是上面的 Early Stopping)
-        except Exception:
-            pass
+            attn_scores = acts.get(f"layers.{prev_layer}.attn_scores")  # [1, n_heads, seq_len, seq_len]
+            
+            if attn_scores is not None:
+                
+                attn_layer = self.model.model.layers[prev_layer].self_attn
+                W_V = attn_layer.v_proj.weight.to(target_vector.dtype)  # [num_kv_heads * head_dim, d_model]
+                W_O = attn_layer.o_proj.weight.to(target_vector.dtype)  # [d_model, num_heads * head_dim]
+                # # W_V shape: torch.Size([256, 1152]), W_O shape: torch.Size([1152, 1024])
+                # print(f"W_V shape: {W_V.shape}, W_O shape: {W_O.shape}")
+                
+                num_heads = self.config.num_attention_heads
+                num_kv_heads = self.config.num_key_value_heads
+                head_dim = self.config.head_dim
+                groups = num_heads // num_kv_heads
+                # # num_heads: 4, num_kv_heads: 1, head_dim: 256, groups: 4
+                # print(f"num_heads: {num_heads}, num_kv_heads: {num_kv_heads}, head_dim: {head_dim}, groups: {groups}")
+                
+                # 注意：Attn 涉及多个源 Token，每个 Token 的 Scale 不同
+                # 形状: [seq_len, 1]
+                ln_in_attn = acts[f"layers.{prev_layer}.attn_input_residual"][0].to(target_vector.dtype) # [seq, d_model]
+                ln_out_attn = acts[f"layers.{prev_layer}.attn_input"][0].to(target_vector.dtype)  # [seq, d_model]
+                scale_attn = (ln_out_attn.norm(dim=-1) / (ln_in_attn.norm(dim=-1) + 1e-6))  # [seq]
+                
+                # 2. 计算 OV Circuit 的投影
+                # 对于每个 Head h:
+                # Out_h = (x @ W_V_h) @ W_O_h
+                # Contribution = (Out_h) @ target_vector
+                #              = x @ W_V_h @ W_O_h @ target_vector
+                # 我们可以先计算: virtual_grad = W_O @ target_vector -> [n_heads * d_head]
+                
+                # [n_heads * d_head]
+                grad_at_heads = torch.matmul(W_O.t(), target_vector).view(num_heads, head_dim)
+                # # target_vector shape: torch.Size([1152])
+                # print(f"target_vector shape: {target_vector.shape}")
 
-        contributions.sort(key=lambda x: abs(x[0]), reverse=True)
-        return contributions[:top_k]
+                # 3. 遍历所有 Heads 计算贡献 
+                head_token_contribs = []
+                
+                for h in range(num_heads):
+                    kv_h = h // groups
+                    W_V_h = W_V[kv_h * head_dim : (kv_h + 1) * head_dim, :]
+
+                    v_values = torch.matmul(ln_out_attn, W_V_h.t())
+
+                    # 该 Head 在残差流中的投影方向: direction = W_V_h.T @ grad_at_head_h
+                    ov_direction = torch.matmul(W_V_h.t(), grad_at_heads[h])  # [d_model]
+
+                    # 计算所有 source tokens 对 dst_token 的归因
+                    # pattern: [seq_len]
+                    pattern = attn_scores[0, h, token_idx, :].to(target_vector.dtype)
+                    
+                    # 归因 = Pattern * (x_pre @ ov_direction)
+                    # 这里的 x_pre 包含了 V 投影前的所有信息
+                    token_attribs = pattern * torch.matmul(v_values, grad_at_heads[h])
+                    for s_idx in range(len(token_attribs)):
+                        score = token_attribs[s_idx].item()
+                        if abs(score) >= threshold:
+                            # 保存 (分数, head_idx, source_token_idx, pullback_vector)
+                            # 注意：pullback_vector 需要乘以该位置的 LN scale
+                            next_vec = ov_direction * pattern[s_idx] * scale_attn[s_idx].item()
+                            head_token_contribs.append((score, h, s_idx, next_vec))
+                    
+                # 排序并取 Top-K
+                head_token_contribs.sort(key=lambda x: abs(x[0]), reverse=True)
+                for score, h_idx, s_idx, vec in head_token_contribs[:top_k]:
+                    node = CircuitNode(prev_layer, 'attn_head', h_idx, src_token=s_idx)
+                    contributions.append((score, node))
+                    next_vectors.append(vec)
+                    
+        except Exception as e:
+             import traceback
+             traceback.print_exc()
+             print(f"[Warning] Attention calcs failed for L{prev_layer}: {e}")
+
+        return contributions, next_vectors
 
     def run(self, start_layer, start_feature_idx, input_text, max_depth=2, branches=3) -> CircuitGraph:
         self.act_engine.set_input(input_text)
@@ -259,140 +347,227 @@ class CircuitDiscoverer:
         # 初始化图
         graph = CircuitGraph()
         root = CircuitNode(start_layer, 'transcoder_feature', start_feature_idx)
+        root_vector = self.get_transcoder_feature_vector(start_layer, start_feature_idx)
+        
+        root_acts = self.act_engine.get_layer_activations(start_layer)
+        ln_in = root_acts[f"layers.{start_layer}.transcoder_input_residual"][0, token_idx, :]
+        ln_out = root_acts[f"layers.{start_layer}.transcoder_input"][0, token_idx, :]
+        scale = ln_out.norm() / (ln_in.norm() + 1e-6)
+        root_vector = root_vector * scale
+
         graph.nodes[str(root)] = root
         graph.node_scores[str(root)] = 10.0 # 根节点默认最大分
      
-        current_layer_nodes = [root]
+        current_layer_nodes = [(root, root_vector)]
      
         print(f"Starting discovery for {root}...")
      
         for depth in range(max_depth):
             # print(f"Depth {depth+1}...")
-            next_layer_nodes = []
+            next_layer_dict = {}  # {node_str: (node, vector)}
          
-            # 进度条
             pbar = tqdm(current_layer_nodes, desc=f"Layer {start_layer - depth} -> {start_layer - depth -1}", leave=False)
-            for node in pbar:
+            for node, target_vec in pbar:
                 if node.node_type == 'transcoder_feature':
-                    target_vec = self.get_transcoder_feature_vector(node.layer, node.index)
-                    upstream = self.calculate_upstream(target_vec, node.layer, token_idx, top_k=branches)
+                    upstream_contribs, upstream_vectors = self.calculate_upstream(
+                        target_vec, node.layer, token_idx, top_k=branches
+                    )
                  
-                    for score, prev_node in upstream:
+                    for (score, prev_node), next_vec in zip(upstream_contribs, upstream_vectors):
                         graph.add_edge(prev_node, node, score)
-                        next_layer_nodes.append(prev_node)
+                        k = str(prev_node)
+                        if k not in next_layer_dict:
+                            next_layer_dict[k] = (prev_node, next_vec)
+                        else:
+                            existing_node, existing_vec = next_layer_dict[k]
+                            next_layer_dict[k] = (existing_node, existing_vec + next_vec)
          
-            if not next_layer_nodes:
+            if not next_layer_dict:
                 print(f"Early stopping at depth {depth+1} due to no upstream nodes.")
                 break
-            current_layer_nodes = list(set(next_layer_nodes))
+
+            current_layer_nodes = list(next_layer_dict.values())
          
         return graph
 
-def plot_circuit_graph(graph: CircuitGraph, save_path="transcoder_circuit.png"):
+def print_circuit(graph: CircuitGraph):
     """
-    使用 Plotly 绘制计算图。
-    模仿 circuit_analysis.py 的风格：
-    X轴: 层数 (Layer)
-    Y轴: 节点 (自动排布)
+    仿照作者风格，打印计算图中所有显著的路径连接
+    """
+    print("\n" + "="*60)
+    print(f"{'TRANSCODER CIRCUIT ANALYSIS REPORT':^60}")
+    print("="*60)
+    
+    # 将边按目标节点的层数从高到低排序（从输出往输入看）
+    sorted_edges = sorted(graph.edges, key=lambda e: (e.target.layer, e.source.layer), reverse=True)
+    
+    current_target = None
+    for edge in sorted_edges:
+        if str(edge.target) != current_target:
+            current_target = str(edge.target)
+            print(f"\n[Target Node]: {edge.target}")
+            print(f"  {'Contribution':<15} | {'Source Node':<20}")
+            print(f"  {'-'*15}-+-{'-'*20}")
+        
+        # 打印贡献分数和来源节点
+        print(f"  {edge.score:>+15.4f} | {edge.source}")
+
+    print("\n" + "="*60)
+
+import plotly.graph_objects as go
+import numpy as np
+from collections import defaultdict
+
+def plot_circuit_graph(graph: CircuitGraph, save_path="circuit_viz.png"):
+    """
+    改进版绘图函数：自适应大小、清晰连线、改进配色、解决重叠。
     """
     if not graph.nodes:
         print("Graph is empty, nothing to plot.")
         return
 
-    # 1. 布局计算 (Node Layout)
-    # 按层分组
-    layers = defaultdict(list)
-    for node_str, node in graph.nodes.items():
-        layers[node.layer].append(node)
- 
-    # 计算坐标
-    node_x = []
-    node_y = []
-    node_text = []
-    node_color = []
-    node_size = []
- 
-    # 简单的 Y 轴排布：在该层均匀分布
-    node_pos_map = {} # str(node) -> (x, y)
- 
-    sorted_layers = sorted(layers.keys())
-    for layer in sorted_layers:
-        nodes_in_layer = layers[layer]
-        # 简单的排序，尝试减少交叉 (heuristic)
-        nodes_in_layer.sort(key=lambda x: (x.node_type, x.index))
-     
-        for i, node in enumerate(nodes_in_layer):
-            x = layer
-            # 归一化 Y 坐标到 [0, 1]，加一点 jitter 看起来更自然
-            y = (i + 1) / (len(nodes_in_layer) + 1)
-         
-            node_pos_map[str(node)] = (x, y)
-         
-            node_x.append(x)
-            node_y.append(y)
-            node_text.append(f"{node}<br>Score: {graph.node_scores.get(str(node), 0):.2f}")
-         
-            # 颜色和大小
-            score = graph.node_scores.get(str(node), 0.1)
-            # 简单的颜色映射
-            node_color.append(score)
-            node_size.append(15 + np.log(score + 1) * 5) # Log size
+    # --- 1. 数据准备与自适应尺度计算 ---
+    layers = sorted(list(set(n.layer for n in graph.nodes.values())))
+    if not layers: return
 
-    # 2. 边 (Edges)
-    edge_x = []
-    edge_y = []
- 
-    for edge in graph.edges:
-        start_pos = node_pos_map[str(edge.source)]
-        end_pos = node_pos_map[str(edge.target)]
-     
-        # Plotly 画线需要 None 分隔
-        edge_x.extend([start_pos[0], end_pos[0], None])
-        edge_y.extend([start_pos[1], end_pos[1], None])
+    # 统计每一层的节点数，找出最大值用于计算画布高度
+    nodes_per_layer = defaultdict(list)
+    max_nodes_in_a_layer = 0
+    for node in graph.nodes.values():
+        nodes_per_layer[node.layer].append(node)
+    
+    for layer in layers:
+        # 先按类型排，再按索引排，保证布局整齐
+        nodes_per_layer[layer].sort(key=lambda x: (x.node_type, x.index))
+        max_nodes_in_a_layer = max(max_nodes_in_a_layer, len(nodes_per_layer[layer]))
 
-    # 3. 绘图
+    # 【核心改进：自适应画布大小】
+    # 高度：保证每个节点至少有 60px 的垂直空间，最低 700px
+    dynamic_height = max(700, max_nodes_in_a_layer * 60 + 200) 
+    # 宽度：保证每层之间有足够的水平空间
+    layer_span = max(layers) - min(layers) + 1
+    dynamic_width = max(900, layer_span * 180)
+
+    # 计算节点坐标
+    pos = {} # node_str -> (x, y)
+    node_list = [] # 用于后续批量添加 Trace
+
+    for layer in layers:
+        layer_nodes = nodes_per_layer[layer]
+        n_nodes = len(layer_nodes)
+        for i, node in enumerate(layer_nodes):
+            # X轴：层数
+            # Y轴：在 [0, 1] 区间内均匀分布。由于画布高度自适应，物理间隔会拉大。
+            # 使用 (i + 0.5) / n_nodes 让节点居中分布
+            y_pos = (i + 0.5) / n_nodes
+            pos[str(node)] = (layer, y_pos)
+            node_list.append(node)
+
     fig = go.Figure()
 
-    # 添加边
-    fig.add_trace(go.Scatter(
-        x=edge_x, y=edge_y,
-        mode='lines',
-        line=dict(width=1, color='#888'),
-        hoverinfo='none',
-        name='Attribution'
-    ))
+    # --- 2. 绘制连线 (Edges) ---
+    # 【核心改进：提高可见性】
+    max_score = max([abs(e.score) for e in graph.edges]) if graph.edges else 1.0
+    
+    for edge in graph.edges:
+        x0, y0 = pos[str(edge.source)]
+        x1, y1 = pos[str(edge.target)]
+        
+        abs_score = abs(edge.score)
+        # 归一化分数用于计算线宽和透明度
+        norm_score = abs_score / (max_score + 1e-6)
+        
+        # 线宽：基础 1.5px，最粗 6px
+        width = 1.5 + norm_score * 4.5
+        # 透明度：基础 0.4 (保证可见)，最高 0.9 (深色)
+        opacity = 0.4 + norm_score * 0.5
+        line_color = f'rgba(80, 80, 80, {opacity:.2f})'
 
-    # 添加节点
+        fig.add_trace(go.Scatter(
+            x=[x0, x1, None], y=[y0, y1, None],
+            mode='lines',
+            line=dict(width=width, color=line_color),
+            hoverinfo='text',
+            hovertext=f"Score: {edge.score:.4f}<br>From: {edge.source}<br>To: {edge.target}",
+            showlegend=False
+        ))
+
+    # --- 3. 绘制节点 (Nodes) ---
+    node_x, node_y, node_text, node_labels, node_color, node_size = [], [], [], [], [], []
+    
+    for node in node_list:
+        x, y = pos[str(node)]
+        node_x.append(x)
+        node_y.append(y)
+        
+        # 节点标签
+        type_prefix = "TC" if node.node_type == 'transcoder_feature' else "Attn"
+        token_suffix = f"@T{node.src_token}" if node.src_token is not None else ""
+        label = f"{type_prefix}[{node.index}]{token_suffix}"
+        node_labels.append(label)
+        
+        # 悬浮文本
+        total_score = graph.node_scores.get(str(node), 0)
+        node_text.append(f"<b>{label}</b><br>Layer: {node.layer}<br>Total Attribution: {total_score:.4f}")
+        
+        # 【核心改进：配色】
+        # TC用青色(Teal)，Attention用鲜明的皇家蓝(RoyalBlue)
+        c = 'teal' if node.node_type == 'transcoder_feature' else 'royalblue'
+        node_color.append(c)
+        
+        # 节点大小随总贡献度变化
+        s = 20 + np.log(total_score + 1) * 10
+        node_size.append(s)
+
     fig.add_trace(go.Scatter(
         x=node_x, y=node_y,
-        mode='markers',
-        text=node_text,
+        mode='markers+text',
+        text=node_labels,
+        textposition="top center",
+        textfont=dict(size=11, color='black'),
         hoverinfo='text',
+        hovertext=node_text,
         marker=dict(
-            showscale=True,
-            colorscale='Viridis',
             size=node_size,
             color=node_color,
-            line_width=2
+            line=dict(width=2, color='white'), # 加个白边让节点更突出
+            opacity=0.9
         ),
-        name='Features'
+        name='Nodes',
+        showlegend=False
     ))
 
+    # --- 4. 布局设置 ---
     fig.update_layout(
-        # title=title,
-        showlegend=False,
-        xaxis=dict(title="Layer", tickmode='linear', tick0=min(sorted_layers), dtick=1),
-        yaxis=dict(showticklabels=False), # 隐藏 Y 轴刻度，因为没有物理意义
-        margin=dict(l=40, r=40, b=40, t=40),
-        height=600
+        title=dict(text=f"Transcoder Circuit Graph (Adaptive Layout)", x=0.5, font=dict(size=20)),
+        xaxis=dict(
+            title="Model Layer (Input ← → Output)", 
+            tickmode='array', 
+            tickvals=layers, 
+            gridcolor='rgba(200,200,200,0.5)',
+            zeroline=False
+        ),
+        yaxis=dict(
+            showticklabels=False, # 隐藏Y轴刻度，因为是相对位置
+            showgrid=False, 
+            zeroline=False,
+            range=[-0.05, 1.05] # 稍微留点边距
+        ),
+        plot_bgcolor='rgba(250, 250, 250, 1)', # 极淡的灰色背景
+        # 【应用自适应宽高】
+        height=dynamic_height,
+        width=dynamic_width,
+        margin=dict(l=60, r=60, b=80, t=100)
     )
- 
-    # save figure
+    
     fig.write_image(save_path)
+    print(f"Improved circuit visualization saved to: {save_path}")
+    print(f"Canvas size: {dynamic_width}x{dynamic_height} (Adaptive based on {len(layers)} layers, max {max_nodes_in_a_layer} nodes/layer)")
 
 def run_analysis_pipeline(
     model_name, 
     device="cuda", 
+    prompt="The quick brown fox jumped over the lazy dog.",
     target_feat=100,
     max_depth=3,
     max_branches=4,
@@ -415,7 +590,6 @@ def run_analysis_pipeline(
     discoverer = CircuitDiscoverer(model, tc_manager, act_engine)
  
     target_layer = transcoder_kwargs["layer"]
-    prompt = "The quick brown fox jumped over the lazy dog."
  
     graph = discoverer.run(
         start_layer=target_layer,
@@ -424,11 +598,13 @@ def run_analysis_pipeline(
         max_depth=max_depth,
         branches=max_branches
     )
- 
+
+    print_circuit(graph)
+
     print("Plotting graph...")
     fig_dir = ROOT_DIR / "figures/transcoder_circuits/test"
     fig_dir.mkdir(parents=True, exist_ok=True)
-    plot_circuit_graph(graph, save_path=f"{fig_dir}/layer{target_layer}_feat{target_feat}_depth{max_depth}_branches{max_branches}.png")
+    plot_circuit_graph(graph, save_path=f"{fig_dir}/layer{target_layer}_feat{target_feat}_depth{max_depth}_branches{max_branches}.pdf")
  
     del model
     torch.cuda.empty_cache()
@@ -449,9 +625,9 @@ if __name__ == "__main__":
     run_analysis_pipeline(
         "google/gemma-3-1b-pt",
         device="cuda:5",
-        target_feat=100,
-        max_depth=5,
-        max_branches=8,
+        target_feat=101,
+        max_depth=3,
+        max_branches=6,
         use_recomputation=False,
         **transcoder_kwargs,
     )
