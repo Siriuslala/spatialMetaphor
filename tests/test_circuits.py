@@ -85,6 +85,8 @@ def get_gpt2_circuit_eap(
     target="happy",
     lang="en",
     use_ig=False,
+    calc_batch_size=None,
+    ie_over_seq: bool = False,
 ):
     """
     Get the circuit for a task using EAP.
@@ -120,6 +122,8 @@ def get_gpt2_circuit_eap(
         patching_metric_metaphor,
         upstream_nodes=["mlp", "head"],
         downstream_nodes=["mlp", "head"],
+        calc_batch_size=calc_batch_size,
+        ie_over_seq=ie_over_seq,
     )
 
     edges = graph.top_edges(n=num_edges, abs_scores=True)
@@ -146,23 +150,25 @@ def get_gpt2_circuit_atp(model_name, device="cuda:0", num_nodes=20, theme="emoti
 if __name__ == "__main__":
 
     # Get circuits via EAP ======================================================================
-    if True:
+    if False:
         # 7b: >30000M (bsz=1)
-        model_name = "qwen2.5-7b"  # "gpt2-small"  "qwen2.5-7b"
-        device = "cuda:7"
+        model_name = "gpt2-small"  # "gpt2-small"  "qwen2.5-7b"
+        device = "cuda:5"
         num_edges = 10000
-        theme = "space"  # "emotion", "space"
-        target = "down"
+        theme = "ioi"  # "emotion", "space"
+        target = ""
         lang = "en"
-        use_ig = False
-        get_gpt2_circuit_eap(model_name=model_name, device=device, num_edges=num_edges, theme=theme, target=target, lang=lang, use_ig=use_ig)
+        use_ig = True
+        calc_batch_size = 1
+        get_gpt2_circuit_eap(model_name=model_name, device=device, num_edges=num_edges, theme=theme, target=target, lang=lang, use_ig=use_ig, calc_batch_size=calc_batch_size)
     
     # Compute circuits overlap ======================================================================
-    if False:
+    if True:
         lang = "en"
-        model_name = "qwen2.5-7b" #  "gpt2-small"  "qwen2.5-7b"
-        scene_0 = ["space", "up"]
-        scene_1 = ["emotion", "happy"]
+        model_name = "gpt2-small"  #  "gpt2-small"  "qwen2.5-7b"
+        scene_0 = ["emotion", "happy"]
+        scene_1 = ["space", "up"]  # ["emotion", "happy"]
+        eap_method = "eap_ig"
         topn = 1000
         def get_scene_name(scene):
             if scene[1] is not None and scene[1] != "":
@@ -171,8 +177,8 @@ if __name__ == "__main__":
                 return scene[0]
         scene_0_name = get_scene_name(scene_0)
         scene_1_name = get_scene_name(scene_1)
-        task1_circuit_path = ROOT_DIR / f"figures/circuits/{scene_0_name}/{lang}/{model_name}/eap/info.jsonl"
-        task2_circuit_path = ROOT_DIR / f"figures/circuits/{scene_1_name}/{lang}/{model_name}/eap/info.jsonl"
+        task1_circuit_path = ROOT_DIR / f"figures/circuits/{scene_0_name}/{lang}/{model_name}/{eap_method}/info.jsonl"
+        task2_circuit_path = ROOT_DIR / f"figures/circuits/{scene_1_name}/{lang}/{model_name}/{eap_method}/info.jsonl"
         compute_circuit_overlap(task1_circuit_path, task2_circuit_path, topn=topn)
 
         # qwen2.5-7b (topn=1000):
@@ -180,11 +186,12 @@ if __name__ == "__main__":
         # emotion vs. ioi: IoU^{n}: 0.2960
         # space vs. ioi: IoU^{n}: 0.2989
 
-        # gpt2-small (topn=1000):
-        # emotion_happy vs. space_up: IoU^{n}: 0.5600, IoU^{e}: 0.2151
-        # emotion_sad vs. space_down: IoU^{n}: 0.6036, IoU^{e}: 0.2453
-        # emotion_happy vs. space_down: IoU^{n}: 0.5928, IoU^{e}: 0.2477
+        # gpt2-small (eap, topn=1000):
+        # emotion_happy vs. space_up: IoU^{n}: 0.6239, IoU^{e}: 0.2715
+        # emotion_sad vs. space_down: IoU^{n}: 0.6145, IoU^{e}: 0.2539
+        # emotion_happy vs. space_down: IoU^{n}: 0.5942, IoU^{e}: 0.2516
         # emotion_sad vs. space_up: IoU^{n}: 0.5470, IoU^{e}: 0.2005
-        # emotion_happy vs. ioi: IoU^{n}: 0.4585, IoU^{e}: 0.1325
-        # emotion_sad vs. ioi: IoU^{n}: 0.4462, IoU^{e}: 0.1357
+        # emotion_happy vs. ioi: IoU^{n}: 0.4314, IoU^{e}: 0.1710
+        # emotion_sad vs. ioi: IoU^{n}: 0.4389, IoU^{e}: 0.1682
+        # emotion_happy vs. emotion_sad: IoU^{n}: 0.6502, IoU^{e}: 0.3550
         
