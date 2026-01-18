@@ -21,7 +21,8 @@ def EAP_corrupted_forward_hook(
     graph: EAPGraph,
     end_positions: Int[Tensor, "batch_size"],
     ie_over_seq: bool = False,
-):
+):  
+    batch_size = activations.shape[0]
     hook_slice = graph.get_hook_slice(hook.name)
     if activations.ndim == 3:
         # We are in the case of a residual layer or MLP
@@ -32,7 +33,7 @@ def EAP_corrupted_forward_hook(
             upstream_activations_difference[:, :, hook_slice, :] = -activations.unsqueeze(-2)
         else:
             # get the activations at the end positions
-            upstream_activations_difference[:, hook_slice, :] = -activations[:, end_positions, :].squeeze(1).unsqueeze(-2)
+            upstream_activations_difference[:, hook_slice, :] = -activations[torch.arange(batch_size), end_positions, :].unsqueeze(-2)
     elif activations.ndim == 4:
         # We are in the case of an attention layer
         # Activations have shape [batch_size, seq_len, n_heads, d_model]
@@ -40,7 +41,7 @@ def EAP_corrupted_forward_hook(
             upstream_activations_difference[:, :, hook_slice, :] = -activations
         else:
             # get the activations at the end positions
-            upstream_activations_difference[:, hook_slice, :] = -activations[:, end_positions, :, :].squeeze(1)
+            upstream_activations_difference[:, hook_slice, :] = -activations[torch.arange(batch_size), end_positions, :, :].squeeze(1)
 
 def EAP_clean_forward_hook(
     activations: Union[Float[Tensor, "batch_size seq_len n_heads d_model"], Float[Tensor, "batch_size seq_len d_model"]],
@@ -49,14 +50,15 @@ def EAP_clean_forward_hook(
     graph: EAPGraph,
     end_positions: Int[Tensor, "batch_size"],
     ie_over_seq: bool = False,
-):
+):  
+    batch_size = activations.shape[0]
     hook_slice = graph.get_hook_slice(hook.name)
     if activations.ndim == 3:
         if ie_over_seq:
             upstream_activations_difference[:, :, hook_slice, :] += activations.unsqueeze(-2)
         else:
             # get the activations at the end positions
-            upstream_activations_difference[:, hook_slice, :] += activations[:, end_positions, :].squeeze(1).unsqueeze(-2)
+            upstream_activations_difference[:, hook_slice, :] += activations[torch.arange(batch_size), end_positions, :].unsqueeze(-2)
     elif activations.ndim == 4:
         # print(f"end_positions: {end_positions}")
         # print(f"activations.shape: {activations.shape}")
@@ -66,7 +68,7 @@ def EAP_clean_forward_hook(
             upstream_activations_difference[:, :, hook_slice, :] += activations
         else:
             # get the activations at the end positions
-            upstream_activations_difference[:, hook_slice, :] += activations[:, end_positions, :, :].squeeze(1)
+            upstream_activations_difference[:, hook_slice, :] += activations[torch.arange(batch_size), end_positions, :, :].squeeze(1)
     # print(f"upstream_activations_difference.shape: {upstream_activations_difference.shape}")
     # print(f"activations.shape: {activations.shape}")
     # breakpoint()
@@ -79,6 +81,7 @@ def EAP_clean_backward_hook(
     end_positions: Int[Tensor, "batch_size"],
     ie_over_seq: bool = False,
 ):
+    batch_size = grad.shape[0]
     hook_slice = graph.get_hook_slice(hook.name)
 
     # we get the slice of all upstream nodes that come before this downstream node
@@ -98,7 +101,7 @@ def EAP_clean_backward_hook(
             grad_expanded.transpose(-1, -2)
         ).sum(dim=0).sum(dim=0)  # we sum over the batch_size and seq_len dimensions
     else:
-        grad_expanded = grad_expanded[:, end_positions, :, :].squeeze(1)
+        grad_expanded = grad_expanded[torch.arange(batch_size), end_positions, :, :]
         result = torch.matmul(
             upstream_activations_difference[:, earlier_upstream_nodes_slice],
             grad_expanded.transpose(-1, -2)
@@ -172,7 +175,8 @@ def EAP_IG_interpolation_forward_hook(
         interpolated_act = corr_act + alpha * (activations - corr_act)
     else:
         interpolated_act = activations
-        interpolated_act[:, end_positions, ...] = corr_act[:, end_positions, ...] + alpha * (interpolated_act[:, end_positions, ...] - corr_act[:, end_positions, ...])
+        batch_indices = torch.arange(activations.shape[0])
+        interpolated_act[batch_indices, end_positions, ...] = corr_act[batch_indices, end_positions, ...] + alpha * (interpolated_act[batch_indices, end_positions, ...] - corr_act[batch_indices, end_positions, ...])
     interpolated_act.requires_grad_(True)
     return interpolated_act
 

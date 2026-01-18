@@ -149,6 +149,13 @@ def format_prompt_gemma(user_prompt: str) -> str:
     <start_of_turn>model
     """
 
+def get_target_token_position(tokens: List[str], target_token: str) -> int:
+    target_str = "Ġ" + target_token if target_token.isalnum() else target_token
+    for i in range(len(tokens) - 1, -1, -1):
+        if tokens[i] == target_str or tokens[i].strip('▁') == target_token:
+            return i
+    raise ValueError(f"Target token {target_token} not found in tokens {tokens}")
+
 
 if __name__ == "__main__":
     

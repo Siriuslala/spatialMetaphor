@@ -1,44 +1,86 @@
 from functools import partial
 
+from transformers.tokenization_utils_base import BatchEncoding
+
+
 def gather_acts_hook(mod, inputs, outputs, cache: dict, key: str, use_input: bool):
-    # print(f"inputs type: {type(inputs)}")
-    # print(f"outputs type: {type(outputs)}")
-    # print(f"inputs len: {len(inputs)}")
-    # print(f"outputs len: {len(outputs)}")
+    # print(f"inputs type: {type(inputs)}")  # tuple
+    # print(f"outputs type: {type(outputs)}")  # torch.Tensor
     # breakpoint()
-    # In a layer, the inputs and outputs are a tuple of one tensor of size (batch_size, seq_len, hidden_size)
-    acts = inputs[0].squeeze(0) if use_input else outputs[0]
-    cache[key] = acts.detach()
+    # print(f"inputs shape: {inputs[0].shape}")
+    # print(f"outputs shape: {outputs[0].shape}")
+    # breakpoint()
+    acts = inputs if use_input else outputs
+    if isinstance(acts, tuple):
+        acts = acts[0]
+    cache[key] = acts.detach()  # (bsz, seq_len, hidden_size)
     return outputs
     
 def gather_residual_activations(model, target_layer, inputs):
     cache = {}
     # register the `gather_acts_hook` to the target layer
-    handle = model.model.layers[target_layer].register_forward_hook(
-        partial(gather_acts_hook, cache=cache, key="resid_post", use_input=False)
-    )
-    try:
-        _ = model(inputs)
-    finally:
-        handle.remove()
+    handles = []
+    if isinstance(target_layer, int):
+        handle = model.model.layers[target_layer].register_forward_hook(
+            partial(gather_acts_hook, cache=cache, key="resid_post", use_input=False)
+        )
+        handles.append(handle)
+    elif isinstance(target_layer, list):
+        for layer_id in target_layer:
+            handle = model.model.layers[layer_id].register_forward_hook(
+                partial(gather_acts_hook, cache=cache, key=f"resid_post_layer{layer_id}", use_input=False)
+            )
+            handles.append(handle)
+    else:
+        raise ValueError(f"target_layer must be int or list, but got {type(target_layer)}")
 
-    return cache["resid_post"]
+    try:
+        if isinstance(inputs, (dict, BatchEncoding)):
+            _ = model(**inputs)
+        else:
+            _ = model(inputs)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    if isinstance(target_layer, int):
+        return cache["resid_post"]
+    else:
+        return cache
 
 def gather_transcoder_activations(model, target_layer, inputs):
 
     cache = {}
-
-    handle_input = model.model.layers[target_layer].pre_feedforward_layernorm.register_forward_hook(
-        partial(gather_acts_hook, cache=cache, key="transcoder_input", use_input=False)
-    )
-    handle_target = model.model.layers[target_layer].post_feedforward_layernorm.register_forward_hook(
-        partial(gather_acts_hook, cache=cache, key="transcoder_target", use_input=False)
-    )
-
+    handles = []
+    if isinstance(target_layer, int):
+        handle_input = model.model.layers[target_layer].pre_feedforward_layernorm.register_forward_hook(
+            partial(gather_acts_hook, cache=cache, key="transcoder_input", use_input=False)
+        )
+        handle_target = model.model.layers[target_layer].post_feedforward_layernorm.register_forward_hook(
+            partial(gather_acts_hook, cache=cache, key="transcoder_target", use_input=False)
+        )
+        handles.append(handle_input)
+        handles.append(handle_target)
+    elif isinstance(target_layer, list):
+        for layer_id in target_layer:
+            handle_input = model.model.layers[layer_id].pre_feedforward_layernorm.register_forward_hook(
+                partial(gather_acts_hook, cache=cache, key=f"transcoder_input_layer{layer_id}", use_input=False)
+            )
+            handle_target = model.model.layers[layer_id].post_feedforward_layernorm.register_forward_hook(
+                partial(gather_acts_hook, cache=cache, key=f"transcoder_target_layer{layer_id}", use_input=False)
+            )
+            handles.append(handle_input)
+            handles.append(handle_target)
+    else:
+        raise ValueError(f"target_layer must be int or list, but got {type(target_layer)}")
+    
     try:
-        _ = model.forward(inputs)
+        if isinstance(inputs, (dict, BatchEncoding)):
+            _ = model(**inputs)
+        else:
+            _ = model(inputs)
     finally:
-        handle_input.remove()
-        handle_target.remove()
+        for handle in handles:
+            handle.remove()
 
     return cache

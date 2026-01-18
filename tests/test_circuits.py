@@ -152,24 +152,24 @@ if __name__ == "__main__":
     # Get circuits via EAP ======================================================================
     if False:
         # 7b: >30000M (bsz=1)
-        model_name = "gpt2-small"  # "gpt2-small"  "qwen2.5-7b"
+        model_name = "qwen2.5-7b"  # "gpt2-small"  "qwen2.5-7b"
         device = "cuda:5"
         num_edges = 10000
         theme = "ioi"  # "emotion", "space"
         target = ""
         lang = "en"
-        use_ig = True
+        use_ig = False
         calc_batch_size = 1
         get_gpt2_circuit_eap(model_name=model_name, device=device, num_edges=num_edges, theme=theme, target=target, lang=lang, use_ig=use_ig, calc_batch_size=calc_batch_size)
     
     # Compute circuits overlap ======================================================================
-    if True:
+    if False:
         lang = "en"
-        model_name = "gpt2-small"  #  "gpt2-small"  "qwen2.5-7b"
-        scene_0 = ["emotion", "happy"]
-        scene_1 = ["space", "up"]  # ["emotion", "happy"]
-        eap_method = "eap_ig"
-        topn = 1000
+        model_name = "qwen2.5-7b"  #  "gpt2-small"  "qwen2.5-7b"
+        scene_0 = ["space", "up"]
+        scene_1 = ["ioi", ""]  # ["emotion", "happy"]
+        eap_method = "eap"
+        topn = 2500
         def get_scene_name(scene):
             if scene[1] is not None and scene[1] != "":
                 return f"{scene[0]}_{scene[1]}"
@@ -181,10 +181,10 @@ if __name__ == "__main__":
         task2_circuit_path = ROOT_DIR / f"figures/circuits/{scene_1_name}/{lang}/{model_name}/{eap_method}/info.jsonl"
         compute_circuit_overlap(task1_circuit_path, task2_circuit_path, topn=topn)
 
-        # qwen2.5-7b (topn=1000):
-        # emotion_happy vs. space_up: IoU^{n}: 0.4291, IoU^{e}: 0.1969
-        # emotion vs. ioi: IoU^{n}: 0.2960
-        # space vs. ioi: IoU^{n}: 0.2989
+        # qwen2.5-7b (eap, topn=5000):
+        # emotion_happy vs. space_up: IoU^{n}: 0.6119, IoU^{e}: 0.2456
+        # emotion_happy vs. ioi: IoU^{n}: 0.5246, IoU^{e}: 0.1855
+        # space_up vs. ioi: IoU^{n}: 0.4162, IoU^{e}: 0.1636
 
         # gpt2-small (eap, topn=1000):
         # emotion_happy vs. space_up: IoU^{n}: 0.6239, IoU^{e}: 0.2715

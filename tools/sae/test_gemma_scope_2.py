@@ -55,12 +55,12 @@ def test_gemma(device="cuda"):
     prompt = "The law of conservation of energy states that energy cannot be created or destroyed, only transformed."
     # Note that this implicitly adds a special "Beginning of Sequence" or <bos> token to the start
     tokens = tokenizer.tokenize(prompt)
-    inputs = tokenizer.encode(prompt, return_tensors="pt", add_special_tokens=True).to(device)
+    inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=True).to(device)
     print(inputs)
     print(tokens)
 
     # generate text
-    outputs = model.generate(input_ids=inputs, max_new_tokens=50)
+    outputs = model.generate(**inputs, max_new_tokens=50)
     output_str = tokenizer.decode(outputs[0][inputs.shape[1]:])
     print(textwrap.fill(output_str))
 
@@ -73,9 +73,9 @@ def test_gemma_it(device="cuda"):
     tokenizer = AutoTokenizer.from_pretrained("google/gemma-3-1b-it")
 
     user_prompt = "What is your name?"
-    inputs = tokenizer.encode(format_prompt_gemma(user_prompt), return_tensors="pt", add_special_tokens=True).to(device)
+    inputs = tokenizer(format_prompt_gemma(user_prompt), return_tensors="pt", add_special_tokens=True).to(device)
 
-    outputs = model.generate(input_ids=inputs, max_new_tokens=40)
+    outputs = model.generate(**inputs, max_new_tokens=40)
     print(tokenizer.decode(outputs[0][inputs.shape[1]:]))
 
 def load_sae_gemma(
@@ -201,8 +201,7 @@ def test_sae_gemma_pytorch(model_name, device="cuda", **sae_kwargs):
     prompt = "The law of conservation of energy states that energy cannot be created or destroyed, only transformed."
     tokens = tokenizer.tokenize(prompt, add_special_tokens=True)
     print(tokens)
-    inputs = tokenizer.encode(prompt, return_tensors="pt", add_special_tokens=True).to(device)
-    # inputs = tokenizer(prompt, return_tensors="pt")
+    inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=True).to(device)
     
     # forward and cache the residual activations
     target_layer = sae_kwargs["layer"]
@@ -268,7 +267,7 @@ def test_sae_gemma_pytorch_explore_one_feature(
             "A charge accelerating through an electric field experiences a force",
             "Chemical fuel stores energy in molecular bonds, which is released"
         ]:
-            inputs = tokenizer.encode(prompt, return_tensors="pt", add_special_tokens=True).to(device)
+            inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=True).to(device)
             _target_acts = gather_residual_activations(model, target_layer, inputs)
 
             _sae_acts = sae.encode(_target_acts.to(torch.float32))
@@ -328,7 +327,7 @@ def test_sae_gemma_pytorch_intervene_with_sae_features(
 
         handle = model.model.layers[target_layer].register_forward_hook(steering_hook)
         try:
-            outputs = model.generate(input_ids=inputs, max_new_tokens=80, do_sample=False)
+            outputs = model.generate(**inputs, max_new_tokens=80, do_sample=False)
             output_str = tokenizer.decode(outputs[0])
         finally:
             handle.remove()
@@ -337,7 +336,7 @@ def test_sae_gemma_pytorch_intervene_with_sae_features(
 
 
     user_prompt = "Tell me a fun fact."
-    inputs = tokenizer.encode(format_prompt_gemma(user_prompt), return_tensors="pt", add_special_tokens=True).to(device)
+    inputs = tokenizer(format_prompt_gemma(user_prompt), return_tensors="pt", add_special_tokens=True).to(device)
 
     print(user_prompt)
     print("======================= NO STEERING =======================")
@@ -371,13 +370,13 @@ def test_sae_gemma_pytorch_intervene_with_recon(model_name, device="cuda", **sae
     prompt = "The law of conservation of energy states that energy cannot be created or destroyed, only transformed."
     tokens = tokenizer.tokenize(prompt)
     print(tokens)
-    inputs = tokenizer.encode(prompt, return_tensors="pt", add_special_tokens=True).to(device)
+    inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=True).to(device)
     # inputs = tokenizer(prompt, return_tensors="pt")
     
     # prepare hooks
     def fwd_pass_with_sae_intervention(model, sae, target_layer, inputs):
         # Forward pass to get logits & hidden activations
-        model_output_clean = model.forward(inputs, output_hidden_states=True)
+        model_output_clean = model(**inputs, output_hidden_states=True)
         logits_clean = model_output_clean.logits[0]  # (len, vocab_size)
         hidden_states = model_output_clean.hidden_states[target_layer + 1][0]  # (len, d_model), [0]: get first sample
 
@@ -424,7 +423,7 @@ def test_sae_transcoder_pytorch(model_name, device="cuda", **transcoder_kwargs):
     transcoder = load_transcoder_gemma(device=device, **transcoder_kwargs)
 
     prompt = "The quick brown fox jumped over the lazy dog"
-    inputs = tokenizer.encode(prompt, return_tensors="pt", add_special_tokens=True).to(device)
+    inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=True).to(device)
 
     target_layer = transcoder_kwargs["layer"]
     cache = gather_transcoder_activations(model, target_layer, inputs)
@@ -451,7 +450,7 @@ if __name__ == "__main__":
     # test_gemma_it(device="cuda:2")
 
     # test gemma sae ======================================================================
-    if False:
+    if True:
         model_name = "google/gemma-3-1b-it"
         sae_kwargs = {
             "repo_id": "google/gemma-scope-2-1b-pt",  # "google/gemma-scope-2-1b-pt", "google/gemma-scope-2-1b-it"
@@ -461,13 +460,13 @@ if __name__ == "__main__":
             "width": "65k",
             "L0": "medium",
         }
-        # test_sae_gemma_pytorch(model_name, device="cuda:1", **sae_kwargs)
+        test_sae_gemma_pytorch(model_name, device="cuda:1", **sae_kwargs)
         # test_sae_gemma_pytorch_explore_one_feature(model_name, device="cuda:5", **sae_kwargs)
         # test_sae_gemma_pytorch_intervene_with_recon(model_name, device="cuda:1", **sae_kwargs)
-        test_sae_gemma_pytorch_intervene_with_sae_features(model_name, device="cuda:5", **sae_kwargs)
+        # test_sae_gemma_pytorch_intervene_with_sae_features(model_name, device="cuda:5", **sae_kwargs)
     
     # test gemma transcoder ======================================================================
-    if True:
+    if False:
         model_name = "google/gemma-3-1b-pt"
         transcoder_kwargs = {
             "repo_id": "google/gemma-scope-2-1b-pt",  # "google/gemma-scope-2-1b-pt", "google/gemma-scope-2-1b-it"
